@@ -1,0 +1,8 @@
+[functions.daily-alerts]
+verify_jwt = false
+
+[functions.refill-reminders]
+verify_jwt = false
+
+# Cron: daily-alerts at 8:00 AM IST (2:30 AM UTC)
+# Cron: refill-reminders at 9:00 AM IST (3:30 AM UTC)
