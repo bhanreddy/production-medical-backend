@@ -31,27 +31,31 @@ export function createApp(): express.Application {
     next();
   });
 
-  const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const corsAllowAll = allowedOrigins.includes('*');
+  // AppSail's edge handles preflights and injects CORS headers for Authorized Domains.
+  // Adding them here as well produces duplicate headers that browsers reject.
+  if (!process.env.X_ZOHO_CATALYST_LISTEN_PORT) {
+    const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const corsAllowAll = allowedOrigins.includes('*');
 
-  app.use(
-    cors(
-      corsAllowAll
-        ? { origin: true }
-        : {
-            origin(origin, callback) {
-              if (!origin || allowedOrigins.includes(origin)) {
-                callback(null, true);
-              } else {
-                callback(new Error('Not allowed by CORS'));
-              }
+    app.use(
+      cors(
+        corsAllowAll
+          ? { origin: true }
+          : {
+              origin(origin, callback) {
+                if (!origin || allowedOrigins.includes(origin)) {
+                  callback(null, true);
+                } else {
+                  callback(new Error('Not allowed by CORS'));
+                }
+              },
             },
-          },
-    ),
-  );
+      ),
+    );
+  }
 
   app.use(helmetConfig);
   app.use(express.json({ limit: '2mb' }));

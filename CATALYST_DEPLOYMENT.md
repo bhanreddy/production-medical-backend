@@ -12,6 +12,12 @@ Run `npm run deploy:catalyst` to upload to Catalyst Development. Promote the pro
 
 **Production environment variables are separate.** The first promotion did not copy their values. Configure the required variables from the generated AppSail configuration in the Production environment as well, then verify the health endpoint. Never print or commit their values.
 
+## Browser origins / CORS
+
+Catalyst intercepts `OPTIONS` requests before AppSail and owns CORS headers on this host. Register each frontend hostname in Cloud Scale Authentication's Authorized Domains with `cors: true`, `iframe: false`, then promote the Authentication/CORS changes from Development to Production. The API requires bare hostnames and rejects wildcard entries such as `*.nexsyrus.com`. Adding the apex hostname does not authorize its subdomains. The confirmed frontend origins are `nexsyrus.com` and `nexmed.nexsyrus.com`.
+
+Express skips its own CORS middleware when `X_ZOHO_CATALYST_LISTEN_PORT` is present, preventing duplicate `Access-Control-Allow-Origin` headers. Other hosts continue to use `ALLOWED_ORIGINS`. Verify both preflight and actual responses with an `Origin` header; an HTTP 200 alone does not prove CORS works.
+
 ## Durable state
 
 Core cloud tables continue to use the existing Supabase PostgreSQL database. With `DURABLE_RUNTIME=postgres`, embedded workflows use a disposable in-memory SQLite working copy. Each API request acquires a PostgreSQL transaction lock, restores the last checkpoint, runs the existing workflow, and commits its changed checkpoint before releasing the HTTP response. Cloud SQL operations using the transaction wrapper and inventory projection updates join that commit. Rejected requests and failed commits discard the working copy. Private prescription originals are stored as PostgreSQL `bytea`, with existing organization authorization enforced by the document route. Migration 020 enables RLS and removes browser-role access to both storage tables.
