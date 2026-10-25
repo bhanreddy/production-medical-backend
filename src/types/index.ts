@@ -7,6 +7,8 @@ export interface AuthUser {
   role: Role;
   email: string;
   isImpersonating?: boolean;
+  organization_id?: string;
+  organizationId?: string;
   plan?: string;
 }
 

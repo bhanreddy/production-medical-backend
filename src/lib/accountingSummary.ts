@@ -16,6 +16,8 @@ export interface AccountingSummaryResult {
   period: { from: string | null; to: string | null };
 }
 
+import { Money } from './money';
+
 export async function buildAccountingSummary(
   clinicId: string,
   from?: string,
@@ -47,36 +49,36 @@ export async function buildAccountingSummary(
   let gross_revenue = 0;
   let total_returns = 0;
   for (const s of sales) {
-    if (s.is_return) total_returns += Math.abs(Number(s.net_amount));
-    else gross_revenue += Number(s.net_amount);
+    if (s.is_return) total_returns = Money.add(total_returns, Math.abs(Number(s.net_amount || 0)));
+    else gross_revenue = Money.add(gross_revenue, Number(s.net_amount || 0));
   }
 
-  const net_revenue = gross_revenue - total_returns;
-  const cogs = await computeCogs(from, to, clinicId);
-  const gross_profit = net_revenue - cogs;
-  const gross_margin_pct = net_revenue > 0 ? (gross_profit / net_revenue) * 100 : 0;
+  const net_revenue = Money.subtract(gross_revenue, total_returns);
+  const cogs = Money.round2(await computeCogs(from, to, clinicId));
+  const gross_profit = Money.subtract(net_revenue, cogs);
+  const gross_margin_pct = net_revenue > 0 ? Money.round2((gross_profit / net_revenue) * 100) : 0;
 
   const expRows = await queryRaw<{ total: number | string | null }>(
     `SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE ${expConditions.join(' AND ')}`,
     expValues,
   );
-  const total_expenses = Number(expRows[0]?.total ?? 0);
-  const net_profit = gross_profit - total_expenses;
+  const total_expenses = Money.round2(Number(expRows[0]?.total ?? 0));
+  const net_profit = Money.subtract(gross_profit, total_expenses);
 
   const customers = await queryAll('customers', 'clinic_id = ?', [clinicId]);
   const outstanding_receivable = customers.reduce(
     (acc: number, c: Record<string, unknown>) =>
-      acc + Number(c.outstanding_balance ?? c.credit_balance ?? 0),
+      Money.add(acc, Number(c.outstanding_balance ?? c.credit_balance ?? 0)),
     0,
   );
 
   const suppliers = await queryAll('suppliers', 'clinic_id = ?', [clinicId]);
   const outstanding_payable = suppliers.reduce(
-    (acc: number, s: Record<string, unknown>) => acc + Number(s.outstanding_balance ?? 0),
+    (acc: number, s: Record<string, unknown>) => Money.add(acc, Number(s.outstanding_balance ?? 0)),
     0,
   );
 
-  const net_cash_position = net_profit - outstanding_payable + outstanding_receivable;
+  const net_cash_position = Money.subtract(Money.add(net_profit, outstanding_receivable), outstanding_payable);
 
   return {
     gross_revenue,

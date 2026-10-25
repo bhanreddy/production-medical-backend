@@ -1,7 +1,8 @@
 import { z } from 'zod';
 
 const baseSupplierSchema = z.object({
-  name: z.string().min(1).max(200),
+  name: z.string().trim().min(1).max(200),
+  is_active: z.boolean().optional(),
   phone: z.string().regex(/^[6-9]\d{9}$/).optional().nullable(),
   email: z.string().email().optional().nullable(),
   gstin: z.string().length(15).optional().nullable(),

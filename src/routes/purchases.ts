@@ -1,10 +1,15 @@
-import { localMutate, queryAll, queryOne, queryRaw, queryCount } from '../lib/postgresDb';
+import { resolveCloudStoreContext } from '../services/cloudStoreContext';
+import { transactionalRoute } from '../lib/transactionalRoute';
+import { afterPostgresCommit, localMutate, queryAll, queryOne, queryRaw, queryCount } from '../lib/postgresDb';
 import { Router } from 'express';
+import { z } from 'zod';
+import { AppError } from '../lib/appError';
 import { requireAuth } from '../middleware/auth';
 import { requireRole } from '../middleware/rbac';
 import { supabaseAdmin } from '../config/supabase';
 import { createPurchaseSchema, updatePaymentSchema, csvRowSchema } from '../schemas/purchase.schema';
-
+import { InventoryPositionService } from '../services/inventoryPosition';
+import { SupplierSchemeEngine } from '../services/commercial/supplierSchemeEngine';
 
 import multer from 'multer';
 import Anthropic from '@anthropic-ai/sdk';
@@ -33,22 +38,24 @@ purchasesRouter.get('/', requireAuth, async (req, res, next) => {
     if (to) { conditions.push('p.created_at <= ?'); values.push(to); }
 
     const where = conditions.join(' AND ');
-    const totalRows = await queryRaw<{ cnt: number }>(
-      `SELECT COUNT(*)::int as cnt FROM purchases p WHERE p.deleted_at IS NULL AND ${where}`,
-      values
-    );
-    const total = Number(totalRows[0]?.cnt ?? 0);
     const offset = (page - 1) * limit;
 
-    const data = await queryRaw(
-      `SELECT p.*, sup.name as supplier_name
-       FROM purchases p
-       LEFT JOIN suppliers sup ON (sup.id::text = p.supplier_id::text OR sup._local_id::text = p.supplier_id::text)
-       WHERE p.deleted_at IS NULL AND ${where}
-       ORDER BY p.created_at DESC
-       LIMIT ? OFFSET ?`,
-      [...values, limit, offset]
-    );
+    const [totalRows, data] = await Promise.all([
+      queryRaw<{ cnt: number }>(
+        `SELECT COUNT(*)::int as cnt FROM purchases p WHERE p.deleted_at IS NULL AND ${where}`,
+        values
+      ),
+      queryRaw(
+        `SELECT p.*, sup.name as supplier_name
+         FROM purchases p
+         LEFT JOIN suppliers sup ON (sup.id::text = p.supplier_id::text OR sup._local_id::text = p.supplier_id::text)
+         WHERE p.deleted_at IS NULL AND ${where}
+         ORDER BY p.created_at DESC
+         LIMIT ? OFFSET ?`,
+        [...values, limit, offset]
+      ),
+    ]);
+    const total = Number(totalRows[0]?.cnt ?? 0);
 
     for (const p of data as any[]) {
       p.suppliers = { name: p.supplier_name ?? '' };
@@ -64,71 +71,45 @@ purchasesRouter.get('/', requireAuth, async (req, res, next) => {
 });
 
 // GET /api/purchases/:id
-purchasesRouter.get('/:id', requireAuth, async (req, res, next) => {
-  try {
-    const clinicId = req.user!.clinic_id!;
-    const purchase = await queryOne('purchases', '(_local_id=? OR id=?) AND clinic_id=?', [req.params.id, req.params.id, clinicId]);
-    if (!purchase) return res.status(404).json({ error: 'Purchase not found' });
 
-    const purchaseId = (purchase as any).id;
-    const purchaseItems = await queryAll('purchase_items', 'purchase_id=?', [purchaseId]);
 
-    // Attach medicine names (in batch)
-    const medicineIds = purchaseItems.map((item: any) => item.medicine_id).filter(Boolean);
-    if (medicineIds.length > 0) {
-      const placeholders = medicineIds.map(() => '?').join(',');
-      const medicines = await queryRaw(
-        `SELECT id, _local_id, name, generic_name FROM medicines WHERE (_local_id IN (${placeholders}) OR id IN (${placeholders})) AND _deleted = 0`,
-        [...medicineIds, ...medicineIds]
-      );
-      const medicineMap = new Map();
-      for (const med of medicines) {
-        medicineMap.set(med.id, med);
-        medicineMap.set(med._local_id, med);
-      }
-      for (const item of purchaseItems) {
-        if (item.medicine_id) {
-          const med = medicineMap.get(item.medicine_id);
-          item.medicines = { name: med?.name ?? '', generic_name: med?.generic_name ?? '' };
-        } else {
-          item.medicines = { name: '', generic_name: '' };
-        }
-      }
-    } else {
-      for (const item of purchaseItems) {
-        item.medicines = { name: '', generic_name: '' };
-      }
-    }
-
-    res.json({ data: { ...purchase, purchase_items: purchaseItems } });
-  } catch (err) {
-    next(err);
-  }
-});
+import { Money } from '../lib/money';
 
 // POST /api/purchases
-purchasesRouter.post('/', requireAuth, requireRole('OWNER'), async (req, res, next) => {
+purchasesRouter.post('/', requireAuth, requireRole('OWNER'), transactionalRoute(async (req, res, next) => {
   try {
     const parsed = createPurchaseSchema.parse(req.body);
+    const clinicId = req.user!.clinic_id!;
     
-    // Server-side calculations
+    const { organizationId, storeId, counterId, terminalId } = await resolveCloudStoreContext(clinicId, parsed);
+
+    
+    // Server-side Money calculations
     let subtotal = 0;
     let gst_amount = 0;
+    const calculatedLines = parsed.items.map(item => {
+      const lineCalc = Money.calculateLineItem({
+        quantity: item.quantity,
+        unitPrice: item.purchase_price,
+        discountPct: item.discount,
+        gstRate: item.gst_rate,
+      });
+      subtotal = Money.add(subtotal, Money.multiply(item.quantity, item.purchase_price));
+      gst_amount = Money.add(gst_amount, lineCalc.gstAmount);
+      return { item, lineCalc };
+    });
 
-    for (const item of parsed.items) {
-      subtotal += item.quantity * item.purchase_price;
-      gst_amount += (item.quantity * item.purchase_price * item.gst_rate) / 100;
-    }
-
-    const net_amount = subtotal - 0 + gst_amount;
+    const net_amount = Money.round2(subtotal + gst_amount);
+    const grand_total = net_amount;
 
     // Resolve supplier_id
-    const clinicId = req.user!.clinic_id!;
     let supplierId = null;
+    let supplierObj: any = null;
     if (parsed.supplier_id) {
       const supp = await queryOne('suppliers', '(_local_id=? OR id=?) AND clinic_id=?', [parsed.supplier_id, parsed.supplier_id, clinicId]);
       if (supp) {
         supplierId = (supp as any).id;
+        supplierObj = supp;
       }
     }
 
@@ -137,9 +118,14 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), async (req, res, ne
       table: 'purchases',
       operation: 'INSERT',
       data: {
+        organization_id: organizationId,
+        store_id: storeId,
+        counter_id: counterId,
+        terminal_id: terminalId,
         clinic_id: clinicId,
         supplier_id: supplierId,
         invoice_number: parsed.invoice_number,
+        bill_number: parsed.invoice_number,
         invoice_date: parsed.invoice_date,
         bill_image_url: parsed.bill_image_url,
         notes: parsed.notes,
@@ -147,25 +133,42 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), async (req, res, ne
         discount: 0,
         gst_amount,
         net_amount,
+        grand_total,
         payment_status: 'unpaid',
         paid_amount: 0,
-        created_by: req.user!.id
+        created_by: req.user!.id,
+        _local_id: parsed._local_id,
       }
     });
 
-    // Insert purchase items + update batch stock
-    for (const item of parsed.items) {
-      // Resolve medicine_id to actual DB UUID id
+    // Insert purchase items + update batch stock + update inventory position + record stock ledger
+    for (const { item, lineCalc } of calculatedLines) {
       const med = await queryOne('medicines', '(_local_id=? OR id=?) AND clinic_id=?', [item.medicine_id, item.medicine_id, clinicId]);
       if (!med) {
         throw new Error(`Medicine not found for ID: ${item.medicine_id}`);
       }
       const resolvedMedicineId = (med as any).id;
 
+      // Evaluate procurement supplier scheme for effective unit cost & free stock
+      const schemeResult = SupplierSchemeEngine.evaluateInwardScheme({
+        organizationId: organizationId || clinicId,
+        supplierId,
+        medicineId: resolvedMedicineId,
+        billedQuantity: item.quantity,
+        purchasePrice: item.purchase_price,
+        requestedDiscountPct: item.discount,
+      });
+
+      const effectiveReceivedQuantity = schemeResult.totalReceivedQuantity;
+      const effectiveUnitCost = schemeResult.effectiveUnitCost;
+      const effectiveUnitCostPaise = schemeResult.effectiveUnitCostPaise;
+
       await localMutate({
         table: 'purchase_items',
         operation: 'INSERT',
         data: {
+          organization_id: organizationId,
+          store_id: storeId,
           clinic_id: clinicId,
           purchase_id: purchase.id,
           medicine_id: resolvedMedicineId,
@@ -175,57 +178,128 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), async (req, res, ne
           purchase_price: item.purchase_price,
           mrp: item.mrp,
           gst_rate: item.gst_rate,
-          discount: item.discount,
-          total: item.quantity * item.purchase_price * (1 - item.discount / 100)
+          discount: schemeResult.tradeDiscountPct,
+          total: lineCalc.total,
+          _local_id: item._local_id,
         }
       });
 
-      // Increment stock on batch
+      // Increment stock on batch with blended weighted average effective purchase rate
       const existingBatch = await queryOne('medicine_batches', 'medicine_id=? AND batch_number=? AND clinic_id=?', [resolvedMedicineId, item.batch_number, clinicId]);
+      let batchIdForLedger = '';
+      let newQuantityRemaining = effectiveReceivedQuantity;
+
       if (existingBatch) {
         const oldQty = Number((existingBatch as any).quantity_remaining ?? 0);
         const oldPp = Number((existingBatch as any).purchase_price ?? 0);
-        const addQty = item.quantity;
-        const inboundPp = item.purchase_price;
-        const newQty = oldQty + addQty;
-        const blendedPp =
-          newQty > 0 && oldQty > 0 && oldPp > 0
-            ? (oldQty * oldPp + addQty * inboundPp) / newQty
-            : inboundPp;
+        newQuantityRemaining = oldQty + effectiveReceivedQuantity;
+        const blendedPp = Money.calculateBlendedPurchasePrice({
+          existingQuantity: oldQty,
+          existingPurchasePrice: oldPp,
+          newQuantity: effectiveReceivedQuantity,
+          newPurchasePrice: effectiveUnitCost,
+        });
 
+        batchIdForLedger = (existingBatch as any).id;
         await localMutate({
           table: 'medicine_batches',
           operation: 'UPDATE',
           data: {
             _local_id: (existingBatch as any)._local_id,
-            quantity_remaining: newQty,
+            quantity_remaining: newQuantityRemaining,
             purchase_price: blendedPp,
+            cost_price_paise: Money.toPaise(blendedPp),
+            organization_id: organizationId,
+            store_id: storeId,
           }
         });
       } else {
-        await localMutate({
+        const newBatch = await localMutate({
           table: 'medicine_batches',
           operation: 'INSERT',
           data: {
-            clinic_id: req.user!.clinic_id!,
+            organization_id: organizationId,
+            store_id: storeId,
+            clinic_id: clinicId,
             medicine_id: resolvedMedicineId,
+            supplier_id: supplierId,
             purchase_id: purchase.id,
             batch_number: item.batch_number,
             expiry_date: item.expiry_date,
-            quantity_in: item.quantity,
-            quantity_remaining: item.quantity,
-            purchase_price: item.purchase_price,
+            quantity_in: effectiveReceivedQuantity,
+            quantity_remaining: effectiveReceivedQuantity,
+            purchase_price: effectiveUnitCost,
+            cost_price_paise: effectiveUnitCostPaise,
             mrp: item.mrp,
           }
         });
+        batchIdForLedger = newBatch.id;
       }
+
+      // Adjust Enterprise Inventory Position
+      afterPostgresCommit(() => { if (storeId && organizationId) {
+        try {
+          InventoryPositionService.adjustStock({
+            organizationId,
+            medicineId: resolvedMedicineId,
+            batchId: batchIdForLedger,
+            locationType: 'STORE',
+            storeId,
+            quantityDelta: effectiveReceivedQuantity,
+          });
+        } catch {
+          InventoryPositionService.getOrCreatePosition({
+            organizationId,
+            medicineId: resolvedMedicineId,
+            batchId: batchIdForLedger,
+            locationType: 'STORE',
+            storeId,
+            initialStock: newQuantityRemaining,
+          });
+        }
+      } });
+
+      // Record Immutable Stock Ledger Movement
+      await localMutate({
+        table: 'stock_ledger',
+        operation: 'INSERT',
+        data: {
+          organization_id: organizationId,
+          store_id: storeId,
+          counter_id: counterId,
+          terminal_id: terminalId,
+          clinic_id: clinicId,
+          medicine_id: resolvedMedicineId,
+          batch_id: batchIdForLedger,
+          movement_type: 'PURCHASE_RECEIPT',
+          quantity_delta: effectiveReceivedQuantity,
+          balance_after: newQuantityRemaining,
+          reference_id: purchase.id,
+          notes: schemeResult.freeQuantity > 0 ? `Inward purchase (${item.quantity} paid + ${schemeResult.freeQuantity} free)` : `Inward purchase (${item.quantity} units)`,
+          performed_by: req.user!.id,
+        }
+      });
+    }
+
+    // Update Supplier Outstanding Payable Balance
+    if (supplierId && supplierObj) {
+      const currentOutstanding = Number(supplierObj.outstanding_balance || 0);
+      const newOutstanding = Money.add(currentOutstanding, grand_total);
+      await localMutate({
+        table: 'suppliers',
+        operation: 'UPDATE',
+        data: {
+          _local_id: supplierObj._local_id || supplierObj.id,
+          outstanding_balance: newOutstanding,
+        }
+      });
     }
 
     res.status(201).json({ data: purchase });
   } catch (err) {
     next(err);
   }
-});
+}));
 
 // PUT /api/purchases/:id
 purchasesRouter.put('/:id', requireAuth, requireRole('OWNER'), async (req, res, next) => {
@@ -475,9 +549,10 @@ purchasesRouter.get('/purchase-returns', requireAuth, async (req, res, next) => 
 });
 
 // POST /api/purchases/purchase-returns
-purchasesRouter.post('/purchase-returns', requireAuth, requireRole('OWNER'), async (req, res, next) => {
+purchasesRouter.post('/purchase-returns', requireAuth, requireRole('OWNER'), transactionalRoute(async (req, res, next) => {
   try {
-    const { supplier_id, reference_note, lines } = req.body;
+    const { supplier_id, reference_note, lines } = z.object({ supplier_id: z.string().uuid(), reference_note: z.string().max(2000).optional(), lines: z.array(z.object({ batchId: z.string().uuid(), quantity: z.number().int().positive() })).min(1).max(500) }).parse(req.body);
+    if (!(await queryOne('suppliers', 'id = ? AND clinic_id = ?', [supplier_id, req.user!.clinic_id!]))) throw new AppError(404, 'Supplier not found');
     if (!lines || !lines.length) {
       return res.status(400).json({ error: 'Return requires at least one line' });
     }
@@ -504,14 +579,15 @@ purchasesRouter.post('/purchase-returns', requireAuth, requireRole('OWNER'), asy
     const clinicId = req.user!.clinic_id!;
 
     for (const ln of lines) {
-      const batch = await queryOne('medicine_batches', '(_local_id = ? OR id = ?) AND clinic_id = ?', [ln.batchId, ln.batchId, clinicId]);
+      const [batch] = await queryRaw('SELECT * FROM medicine_batches WHERE (id = ? OR _local_id = ?) AND clinic_id = ? AND deleted_at IS NULL FOR UPDATE', [ln.batchId, ln.batchId, clinicId]);
+      if (batch?.supplier_id && batch.supplier_id !== supplier_id) throw new AppError(400, 'Batch belongs to another supplier');
       if (!batch) {
-        throw new Error(`Batch ${ln.batchId} not found`);
+        throw new AppError(404, 'Batch not found');
       }
       
       const onHand = Number((batch as any).quantity_remaining ?? 0);
       if (onHand < ln.quantity) {
-        throw new Error(`Insufficient stock to return for batch ${(batch as any).batch_number}`);
+        throw new AppError(409, `Insufficient stock to return for batch ${(batch as any).batch_number}`);
       }
 
       const rate = Number((batch as any).purchase_price ?? 0);
@@ -525,6 +601,43 @@ purchasesRouter.post('/purchase-returns', requireAuth, requireRole('OWNER'), asy
         data: {
           _local_id: (batch as any)._local_id,
           quantity_remaining: onHand - ln.quantity
+        }
+      });
+
+      // Adjust Enterprise Inventory Position
+      const batchStoreId = (batch as any).store_id || null;
+      const batchOrgId = (batch as any).organization_id || null;
+      afterPostgresCommit(() => { if (batchStoreId && batchOrgId) {
+        try {
+          InventoryPositionService.adjustStock({
+            organizationId: batchOrgId,
+            medicineId: (batch as any).medicine_id,
+            batchId: (batch as any).id || (batch as any)._local_id,
+            locationType: 'STORE',
+            storeId: batchStoreId,
+            quantityDelta: -ln.quantity,
+          });
+        } catch {
+          // ignore if position not initialized
+        }
+      } });
+
+      // Insert Immutable Stock Ledger Movement
+      await localMutate({
+        table: 'stock_ledger',
+        operation: 'INSERT',
+        data: {
+          organization_id: batchOrgId,
+          store_id: batchStoreId,
+          clinic_id: clinicId,
+          medicine_id: (batch as any).medicine_id,
+          batch_id: (batch as any).id,
+          movement_type: 'PURCHASE_RETURN',
+          quantity_delta: -ln.quantity,
+          balance_after: onHand - ln.quantity,
+          reference_id: returnId,
+          notes: reference_note || 'Purchase return to supplier',
+          performed_by: req.user!.id,
         }
       });
 
@@ -570,6 +683,48 @@ purchasesRouter.post('/purchase-returns', requireAuth, requireRole('OWNER'), asy
 
     res.status(201).json({ data: { ...returnHeader, total_value: roundedTotal } });
   } catch (err: any) {
+    next(err);
+  }
+}));
+
+purchasesRouter.get('/:id', requireAuth, async (req, res, next) => {
+  try {
+    const clinicId = req.user!.clinic_id!;
+    const purchase = await queryOne('purchases', '(_local_id=? OR id=?) AND clinic_id=?', [req.params.id, req.params.id, clinicId]);
+    if (!purchase) return res.status(404).json({ error: 'Purchase not found' });
+
+    const purchaseId = (purchase as any).id;
+    const purchaseItems = await queryAll('purchase_items', 'purchase_id=?', [purchaseId]);
+
+    // Attach medicine names (in batch)
+    const medicineIds = purchaseItems.map((item: any) => item.medicine_id).filter(Boolean);
+    if (medicineIds.length > 0) {
+      const placeholders = medicineIds.map(() => '?').join(',');
+      const medicines = await queryRaw(
+        `SELECT id, _local_id, name, generic_name FROM medicines WHERE (_local_id IN (${placeholders}) OR id IN (${placeholders})) AND _deleted = 0`,
+        [...medicineIds, ...medicineIds]
+      );
+      const medicineMap = new Map();
+      for (const med of medicines) {
+        medicineMap.set(med.id, med);
+        medicineMap.set(med._local_id, med);
+      }
+      for (const item of purchaseItems) {
+        if (item.medicine_id) {
+          const med = medicineMap.get(item.medicine_id);
+          item.medicines = { name: med?.name ?? '', generic_name: med?.generic_name ?? '' };
+        } else {
+          item.medicines = { name: '', generic_name: '' };
+        }
+      }
+    } else {
+      for (const item of purchaseItems) {
+        item.medicines = { name: '', generic_name: '' };
+      }
+    }
+
+    res.json({ data: { ...purchase, purchase_items: purchaseItems } });
+  } catch (err) {
     next(err);
   }
 });

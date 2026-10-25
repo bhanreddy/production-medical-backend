@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { supabaseAdmin } from '../config/supabase';
+import { queryRaw } from '../lib/postgresDb';
 import { env } from '../config/env';
 
 // Attach default limits mimicking 'trial' if no row exists
@@ -15,14 +15,24 @@ export const enforcePlan = async (req: Request, res: Response, next: NextFunctio
   const clinic_id = req.user.clinic_id;
 
   try {
-    // Get current subscription + plan limits
-    const { data: sub } = await supabaseAdmin
-      .from('clinic_subscriptions')
-      .select('status, trial_end, plan_name')
-      .eq('clinic_id', clinic_id)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .single();
+    const pathNoQuery = (req.originalUrl || '').split('?')[0];
+    const isCreateSalePost = req.method === 'POST' && /\/api\/sales\/?$/.test(pathNoQuery);
+    const today = new Date().toISOString().split('T')[0];
+    // The sale already uses PostgreSQL. Read current limits and usage together
+    // instead of making three sequential HTTP calls back to the same database.
+    const [snapshot] = await queryRaw(
+      `WITH current_subscription AS (
+         SELECT status, trial_end, plan_name FROM clinic_subscriptions
+         WHERE clinic_id = ? ORDER BY created_at DESC LIMIT 1
+       )
+       SELECT sub.status, sub.trial_end, plan.limits,
+         ${isCreateSalePost ? '(SELECT COUNT(*)::int FROM sales WHERE clinic_id = ? AND sale_date >= ? AND is_return = false)' : 'NULL'} AS bill_count
+       FROM (SELECT 1) seed
+       LEFT JOIN current_subscription sub ON true
+       LEFT JOIN subscription_plans plan ON plan.name = sub.plan_name`,
+      isCreateSalePost ? [clinic_id, clinic_id, today] : [clinic_id],
+    );
+    const sub = snapshot?.status ? snapshot : null;
 
     let limits: any = getDefaultLimits('trial');
     let subStatus = 'trial';
@@ -35,14 +45,8 @@ export const enforcePlan = async (req: Request, res: Response, next: NextFunctio
       subStatus = sub.status;
       trialEnd = sub.trial_end;
 
-      const { data: plan } = await supabaseAdmin
-        .from('subscription_plans')
-        .select('limits')
-        .eq('name', sub.plan_name)
-        .single();
-
-      if (plan && plan.limits) {
-        limits = plan.limits;
+      if (sub.limits) {
+        limits = sub.limits;
       }
       (req as any).planLimits = limits;
     }
@@ -70,17 +74,8 @@ export const enforcePlan = async (req: Request, res: Response, next: NextFunctio
     }
 
     // Enforce POST /api/sales (not /returns) max daily limits — use full URL because mounted routers see path as '/'
-    const pathNoQuery = (req.originalUrl || '').split('?')[0];
-    const isCreateSalePost = req.method === 'POST' && /\/api\/sales\/?$/.test(pathNoQuery);
-
     if (isCreateSalePost) {
-      const today = new Date().toISOString().split('T')[0];
-      const { count } = await supabaseAdmin
-        .from('sales')
-        .select('*', { count: 'exact', head: true })
-        .eq('clinic_id', clinic_id)
-        .gte('sale_date', today)
-        .eq('is_return', false);
+      const count = snapshot?.bill_count;
 
       if (count !== null && count >= (limits.max_daily_bills || 25)) {
         return res.status(402).json({

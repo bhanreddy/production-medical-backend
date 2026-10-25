@@ -9,7 +9,14 @@ healthRouter.get('/', async (req, res) => {
   let dbLatencyMs = 0;
 
   try {
-    await supabaseAdmin.from('clinics').select('id').limit(1);
+    if (process.env.DATABASE_URL) {
+      // A platform health check then keeps the pooled connection open between sales.
+      const { default: sql } = await import('../db');
+      await sql`SELECT 1`;
+    } else {
+      const { error } = await supabaseAdmin.from('clinics').select('id').limit(1);
+      if (error) throw error;
+    }
     dbLatencyMs = Date.now() - start;
   } catch {
     dbStatus = 'disconnected';

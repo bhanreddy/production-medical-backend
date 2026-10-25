@@ -1,0 +1,1 @@
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS credit_limit NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (credit_limit >= 0);

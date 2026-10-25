@@ -1,9 +1,13 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import { supabaseAdmin } from '../config/supabase';
 import { AuthUser } from '../types';
+import { localDb } from '../local-db';
+import { ensureCloudPosDirectory } from '../services/cloudPosDirectory';
+import { getSupabaseUser, getUserProfile } from '../lib/supabaseIdentity';
 
 export const requireAuth = async (req: Request, res: Response, next: NextFunction) => {
+  // Parent router authentication is reusable within this request only.
+  if (req.user) return next();
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -23,19 +27,22 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
           plan: string;
         };
 
-        // Verify user still exists
-        const { data: user } = await supabaseAdmin
-          .from('users')
-          .select('id, role, clinic_id')
-          .eq('id', payload.sub)
-          .single();
+        // Check local DB first for fast offline execution and test speed
+        let resolvedUser: any = null;
+        try {
+          resolvedUser = localDb.prepare('SELECT id, role, clinic_id FROM users WHERE id = ? OR _local_id = ?').get(payload.sub, payload.sub);
+        } catch {}
 
-        if (user) {
-          let finalClinicId = payload.clinic_id;
+        if (!resolvedUser) {
+          resolvedUser = (await getUserProfile(payload.sub)).data;
+        }
+
+        if (resolvedUser) {
+          let finalClinicId = resolvedUser.clinic_id;
           let isImpersonating = false;
 
           // Impersonation logic for super admins
-          if (user.role === 'SUPER_ADMIN' || payload.role === 'SUPER_ADMIN') {
+          if (resolvedUser.role === 'SUPER_ADMIN') {
             const impersonateHeader = req.headers['x-impersonate-clinic'];
             if (impersonateHeader && typeof impersonateHeader === 'string') {
               finalClinicId = impersonateHeader;
@@ -46,7 +53,7 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
           req.user = {
             id: payload.sub,
             clinic_id: finalClinicId,
-            role: (user.role || payload.role) as AuthUser['role'],
+            role: resolvedUser.role as AuthUser['role'],
             email: '',
             isImpersonating,
           };
@@ -59,83 +66,27 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
     }
 
     /* ─── Path 2: Supabase Auth token (legacy / backward compat) ─── */
-    const { data: { user: supabaseUser }, error: authError } = await supabaseAdmin.auth.getUser(token);
+    const { user: supabaseUser, error: authError } = await getSupabaseUser(token);
 
     if (authError || !supabaseUser) {
-      console.error('[auth middleware] Token verification failed:', {
-        message: authError?.message,
-        tokenPrefix: token.substring(0, 20) + '...'
-      });
+      console.error('[auth middleware] Token verification failed:', authError?.message);
+      if (authError && (authError.status === 0 || (authError.status || 0) >= 500 || authError.name === 'AuthRetryableFetchError')) {
+        return res.status(503).json({ error: 'Sign-in verification is temporarily unavailable. Please retry.' });
+      }
       return res.status(401).json({ error: 'Invalid token' });
     }
 
-    console.log('[auth middleware] Verified Supabase user:', supabaseUser.email);
+
     const userId = supabaseUser.id;
     const email = supabaseUser.email || '';
 
     // Fetch additional user details (role, clinic_id) from our system's users table
-    const { data: userRow, error } = await supabaseAdmin
-      .from('users')
-      .select('clinic_id, role')
-      .eq('id', userId)
-      .single();
+    const { data: userRow, error } = await getUserProfile(userId);
 
-    if (error || !userRow) {
-      console.warn(`[auth middleware] User not found in DB. ID: ${userId}, Email: ${email}. Auto-provisioning...`);
-      
-      // Auto-provision: create a clinic + user row so sync has a valid clinic_id
-      try {
-        const meta = supabaseUser.user_metadata || {};
-        const shopName = meta.shop_name || meta.clinic_name || email.split('@')[0] + "'s Clinic";
-
-        // Check if there's already a clinic owned by this email (e.g., partial registration)
-        const { data: existingClinic } = await supabaseAdmin
-          .from('clinics')
-          .select('id')
-          .eq('email', email)
-          .single();
-
-        let clinicId: string;
-
-        if (existingClinic) {
-          clinicId = existingClinic.id;
-          console.log(`[auth middleware] Found existing clinic ${clinicId} for ${email}`);
-        } else {
-          // Create a new clinic
-          const { data: newClinic, error: clinicErr } = await supabaseAdmin
-            .from('clinics')
-            .insert({ name: shopName, email, plan: 'trial' })
-            .select('id')
-            .single();
-
-          if (clinicErr || !newClinic) {
-            console.error('[auth middleware] Failed to auto-create clinic:', clinicErr?.message);
-            // Last resort fallback: proceed without clinic_id (sync will be disabled)
-            req.user = { id: userId, clinic_id: null, role: 'OWNER', email, isImpersonating: false };
-            return next();
-          }
-          clinicId = newClinic.id;
-          console.log(`[auth middleware] Auto-created clinic ${clinicId} for ${email}`);
-        }
-
-        // Create user row
-        const { error: userInsertErr } = await supabaseAdmin
-          .from('users')
-          .upsert({ id: userId, clinic_id: clinicId, full_name: meta.full_name || email.split('@')[0], role: 'OWNER' }, { onConflict: 'id' });
-
-        if (userInsertErr) {
-          console.error('[auth middleware] Failed to auto-create user row:', userInsertErr.message);
-        } else {
-          console.log(`[auth middleware] Auto-created user row for ${email} in clinic ${clinicId}`);
-        }
-
-        req.user = { id: userId, clinic_id: clinicId, role: 'OWNER', email, isImpersonating: false };
-        return next();
-      } catch (provisionErr: any) {
-        console.error('[auth middleware] Auto-provision failed:', provisionErr.message);
-        req.user = { id: userId, clinic_id: null, role: 'OWNER', email, isImpersonating: false };
-        return next();
-      }
+    if (error && error.code !== 'PGRST116') return res.status(503).json({ error: 'Account verification is temporarily unavailable. Please retry.' });
+    if (!userRow) {
+      // Missing account setup is not evidence of an OWNER role. Registration must provision it.
+      return res.status(403).json({ error: { message: 'Your account setup is incomplete. Contact your administrator.', code: 'PROFILE_NOT_CONFIGURED' } });
     }
 
     let finalClinicId = userRow.clinic_id;
@@ -158,6 +109,8 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
       isImpersonating
     };
 
+    const organizationId = await ensureCloudPosDirectory(req.user, userRow.full_name || supabaseUser.user_metadata?.full_name);
+    if (organizationId) { req.user.organization_id = organizationId; req.user.organizationId = organizationId; }
     next();
   } catch (error) {
     next(error);

@@ -1,3 +1,8 @@
+const crypto = require('crypto');
+
 module.exports = {
-  v4: () => '12345678-1234-1234-1234-1234567890ab'
+  v4: () => crypto.randomUUID(),
+  default: {
+    v4: () => crypto.randomUUID()
+  }
 };

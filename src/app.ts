@@ -16,7 +16,11 @@ export function createApp(): express.Application {
   initSentry();
 
   const app = express();
-  app.use(compression());
+  // gzip holds small writes until its window fills, which would delay live events indefinitely.
+  app.use(compression({
+    filter: (req, res) =>
+      !String(res.getHeader('Content-Type') ?? '').startsWith('text/event-stream') && compression.filter(req, res),
+  }));
 
   app.param('id', (req, res, next, id) => {
     if (id !== 'returns' && !validateUUID(id)) {
@@ -51,11 +55,12 @@ export function createApp(): express.Application {
   app.use(express.json({ limit: '2mb' }));
   app.use(express.urlencoded({ limit: '2mb', extended: true }));
   app.use(sanitizeInput);
+  morgan.token('url', req => { const url = 'originalUrl' in req && typeof req.originalUrl === 'string' ? req.originalUrl : req.url || ''; return url.replace(/([?&]token=)[^&]+/gi, '$1[redacted]'); });
   app.use(morgan('dev'));
 
   app.use('/public', publicRouter);
 
-  app.use('/api/auth', authRateLimit);
+  app.use(['/api/auth/login', '/api/auth/register'], authRateLimit);
   app.use('/api', apiRateLimit, routes);
 
   sentryErrorHandler(app);

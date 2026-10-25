@@ -48,6 +48,8 @@ eventsRouter.get('/stream', async (req: Request, res: Response) => {
     return res.status(403).json({ error: 'User not associated with a clinic' });
   }
 
+  if (res.destroyed || res.writableEnded) return;
+
   // ─── SSE Headers ──────────────────────────────────────
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -67,7 +69,7 @@ eventsRouter.get('/stream', async (req: Request, res: Response) => {
   addClient(clinicId, res);
 
   // ─── Cleanup on disconnect ────────────────────────────
-  req.on('close', () => {
+  res.on('close', () => {
     clearInterval(heartbeat);
     removeClient(clinicId, res);
   });

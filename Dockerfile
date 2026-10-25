@@ -13,10 +13,12 @@ RUN npm prune --omit=dev
 FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
+ENV PORT=5000
 
 COPY package*.json ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/migrations ./migrations
 
 EXPOSE 5000
 CMD ["node", "dist/server.js"]

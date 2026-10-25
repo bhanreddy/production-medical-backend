@@ -219,55 +219,35 @@ export const login = async (req: Request, res: Response) => {
 };
 
 export const refresh = async (req: Request, res: Response) => {
-  const refreshToken = req.cookies?.refreshToken || req.body.refreshToken;
-  
-  if (!refreshToken) {
-    return res.status(401).json({ success: false, error: 'No refresh token' });
+  const refreshToken = req.body?.refreshToken || req.cookies?.refreshToken;
+  if (!refreshToken) return res.status(401).json({ success: false, error: 'No refresh token' });
+
+  const secret = process.env.JWT_SECRET || 'fallback_secret_do_not_use_in_prod';
+  const refreshSecret = process.env.JWT_REFRESH_SECRET || secret;
+  let payload: jwt.JwtPayload;
+  try {
+    const verified = jwt.verify(refreshToken, refreshSecret);
+    if (typeof verified === 'string' || !verified.sub) throw new Error('Invalid refresh token');
+    payload = verified;
+  } catch {
+    return res.status(401).json({ success: false, error: 'Invalid refresh token' });
   }
 
   try {
-    const refreshSecret = process.env.JWT_REFRESH_SECRET || process.env.JWT_SECRET || 'fallback_secret_do_not_use_in_prod';
-    const payload = jwt.verify(refreshToken, refreshSecret) as any;
-    
-    // Check if user still exists
-    const { data: user } = await supabaseAdmin
-      .from('users')
-      .select('id, role')
-      .eq('id', payload.sub)
-      .single();
-
-    if (!user) {
-      return res.status(401).json({ success: false, error: 'User no longer exists' });
+    const { data: user, error } = await supabaseAdmin
+      .from('users').select('id, role, clinic_id').eq('id', payload.sub).single();
+    if (error && error.code !== 'PGRST116') {
+      return res.status(503).json({ success: false, error: 'Authentication is temporarily unavailable. Please retry.' });
     }
-
-    const secret = process.env.JWT_SECRET || 'fallback_secret_do_not_use_in_prod';
-    const newRefreshSecret = process.env.JWT_REFRESH_SECRET || secret;
-
-    const newAccessToken = jwt.sign({
-      sub: payload.sub,
-      clinic_id: payload.clinic_id,
-      role: payload.role,
-      plan: payload.plan
-    }, secret, { expiresIn: '15m' });
-
-    // Rotate the refresh token as well
-    const newRefreshToken = jwt.sign({
-      sub: payload.sub,
-      clinic_id: payload.clinic_id,
-      role: payload.role,
-      plan: payload.plan
-    }, newRefreshSecret, { expiresIn: '30d' });
-
-    res.cookie('refreshToken', newRefreshToken, { httpOnly: true, secure: process.env.NODE_ENV === 'production', maxAge: 30 * 24 * 60 * 60 * 1000 });
-
-    return res.status(200).json({
-      success: true,
-      data: {
-        accessToken: newAccessToken,
-        refreshToken: newRefreshToken
-      }
-    });
-  } catch (err) {
-    return res.status(401).json({ success: false, error: 'Invalid refresh token' });
+    if (!user) return res.status(401).json({ success: false, error: 'User no longer exists' });
+    // Re-read role/store assignments on renewal instead of perpetuating old claims.
+    const claims = { sub: user.id, clinic_id: user.clinic_id, role: user.role, plan: payload.plan };
+    const accessToken = jwt.sign(claims, secret, { expiresIn: '15m' });
+    const nextRefreshToken = jwt.sign(claims, refreshSecret, { expiresIn: '30d' });
+    res.cookie('refreshToken', nextRefreshToken, { httpOnly: true, secure: process.env.NODE_ENV === 'production', maxAge: 30 * 24 * 60 * 60 * 1000 });
+    return res.status(200).json({ success: true, data: { accessToken, refreshToken: nextRefreshToken } });
+  } catch {
+    // A database/network outage does not invalidate an otherwise valid refresh token.
+    return res.status(503).json({ success: false, error: 'Authentication is temporarily unavailable. Please retry.' });
   }
 };

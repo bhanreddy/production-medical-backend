@@ -4,6 +4,7 @@ const baseCustomerSchema = z.object({
   name: z.string().min(1).max(200),
   phone: z.string().regex(/^[6-9]\d{9}$/).optional().nullable(),
   email: z.string().email().optional().nullable(),
+  credit_limit: z.number().finite().min(0).optional(),
   doctor_name: z.string().optional().nullable(),
   address: z.string().optional().nullable(),
   clinic_id: z.string().optional(),

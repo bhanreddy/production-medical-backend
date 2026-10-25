@@ -111,12 +111,38 @@ analyticsRouter.get('/customer-insights', requireAuth, async (req, res, next) =>
   try {
     const clinicId = req.user!.clinic_id!;
 
-    const customers = await queryRaw<{ id: string; name: string; importance_score: number; last_purchase_date: string }>(
-      `SELECT id, name, importance_score, last_purchase_date
-       FROM customers
-       WHERE clinic_id = ? AND deleted_at IS NULL AND COALESCE(is_active, true) = true`,
-      [clinicId]
-    );
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+
+    const [customers, newCust, sales, topRows] = await Promise.all([
+      queryRaw<{ id: string; name: string; importance_score: number; last_purchase_date: string }>(
+        `SELECT id, name, importance_score, last_purchase_date
+         FROM customers
+         WHERE clinic_id = ? AND deleted_at IS NULL AND COALESCE(is_active, true) = true`,
+        [clinicId]
+      ),
+      queryCount('customers', 'clinic_id = ? AND created_at >= ?', [clinicId, monthStart.toISOString()]),
+      queryRaw<{ net_amount: number; customer_id: string }>(
+        `SELECT net_amount, customer_id FROM sales
+         WHERE clinic_id = ? AND deleted_at IS NULL AND COALESCE(is_return, false) = false
+         AND created_at >= ?`,
+        [clinicId, startDateFromRange(30)]
+      ),
+      queryRaw<{ id: string; name: string; total_spent: number; order_count: number; importance_score: number }>(
+        `SELECT c.id, c.name, c.importance_score,
+                COALESCE(SUM(s.net_amount), 0) as total_spent,
+                COUNT(s.id)::int as order_count
+         FROM customers c
+         LEFT JOIN sales s ON s.customer_id::text = c.id::text
+           AND s.deleted_at IS NULL AND COALESCE(s.is_return, false) = false
+         WHERE c.clinic_id = ? AND c.deleted_at IS NULL AND COALESCE(c.is_active, true) = true
+         GROUP BY c.id, c.name, c.importance_score
+         ORDER BY total_spent DESC
+         LIMIT 5`,
+        [clinicId]
+      ),
+    ]);
 
     const now = new Date();
     const seg = { high_value: 0, regular: 0, at_risk: 0, lost: 0 };
@@ -133,35 +159,9 @@ analyticsRouter.get('/customer-insights', requireAuth, async (req, res, next) =>
       else seg.lost += 1;
     }
 
-    const monthStart = new Date();
-    monthStart.setDate(1);
-    monthStart.setHours(0, 0, 0, 0);
-    const newCust = await queryCount('customers', 'clinic_id = ? AND created_at >= ?', [clinicId, monthStart.toISOString()]);
-
-    const sales = await queryRaw<{ net_amount: number; customer_id: string }>(
-      `SELECT net_amount, customer_id FROM sales
-       WHERE clinic_id = ? AND deleted_at IS NULL AND COALESCE(is_return, false) = false
-       AND created_at >= ?`,
-      [clinicId, startDateFromRange(30)]
-    );
-
     const baskets = sales.filter((s) => s.customer_id);
     const sum = baskets.reduce((a, s) => a + Number(s.net_amount), 0);
     const avg_basket_size = baskets.length ? Math.round((sum / baskets.length) * 100) / 100 : 0;
-
-    const topRows = await queryRaw<{ id: string; name: string; total_spent: number; order_count: number; importance_score: number }>(
-      `SELECT c.id, c.name, c.importance_score,
-              COALESCE(SUM(s.net_amount), 0) as total_spent,
-              COUNT(s.id)::int as order_count
-       FROM customers c
-       LEFT JOIN sales s ON s.customer_id::text = c.id::text
-         AND s.deleted_at IS NULL AND COALESCE(s.is_return, false) = false
-       WHERE c.clinic_id = ? AND c.deleted_at IS NULL AND COALESCE(c.is_active, true) = true
-       GROUP BY c.id, c.name, c.importance_score
-       ORDER BY total_spent DESC
-       LIMIT 5`,
-      [clinicId]
-    );
 
     const top = topRows.map((c) => ({
       id: c.id,
@@ -191,11 +191,23 @@ analyticsRouter.get('/inventory-health', requireAuth, async (req, res, next) => 
   try {
     const clinicId = req.user!.clinic_id!;
 
-    const batches = await queryRaw<{ quantity_remaining: number; purchase_price: number; expiry_date: string }>(
-      `SELECT quantity_remaining, purchase_price, expiry_date FROM medicine_batches
-       WHERE clinic_id = ? AND deleted_at IS NULL AND quantity_remaining > 0`,
-      [clinicId]
-    );
+    const from = startDateFromRange(30);
+    const [batches, cogs, saleQty] = await Promise.all([
+      queryRaw<{ quantity_remaining: number; purchase_price: number; expiry_date: string }>(
+        `SELECT quantity_remaining, purchase_price, expiry_date FROM medicine_batches
+         WHERE clinic_id = ? AND deleted_at IS NULL AND quantity_remaining > 0`,
+        [clinicId]
+      ),
+      computeCogs(from, new Date().toISOString(), clinicId),
+      queryRaw<{ quantity: number }>(
+        `SELECT si.quantity FROM sale_items si
+         INNER JOIN sales s ON s.id::text = si.sale_id::text
+         WHERE si.deleted_at IS NULL AND s.deleted_at IS NULL
+           AND COALESCE(s.is_return, false) = false
+           AND s.clinic_id = ? AND s.created_at >= ?`,
+        [clinicId, from]
+      ),
+    ]);
 
     let total_inventory_value = 0;
     let expiry_risk_value = 0;
@@ -207,18 +219,7 @@ analyticsRouter.get('/inventory-health', requireAuth, async (req, res, next) => 
       if (new Date(b.expiry_date) <= soon) expiry_risk_value += v;
     }
 
-    const from = startDateFromRange(30);
-    const cogs = await computeCogs(from, new Date().toISOString());
     const turnover_ratio = total_inventory_value > 0 ? Math.round((cogs / total_inventory_value) * 1000) / 1000 : 0;
-
-    const saleQty = await queryRaw<{ quantity: number }>(
-      `SELECT si.quantity FROM sale_items si
-       INNER JOIN sales s ON s.id::text = si.sale_id::text
-       WHERE si.deleted_at IS NULL AND s.deleted_at IS NULL
-         AND COALESCE(s.is_return, false) = false
-         AND s.clinic_id = ? AND s.created_at >= ?`,
-      [clinicId, from]
-    );
 
     const soldQty = saleQty.reduce((a, r) => a + Number(r.quantity), 0);
     const avg_daily_sales_qty = soldQty / 30;
@@ -287,13 +288,30 @@ analyticsRouter.get('/purchase-intelligence', requireAuth, async (req, res, next
     const clinicId = req.user!.clinic_id!;
     const from = startDateFromRange(90);
 
-    const purchases = await queryRaw<{ net_amount: number; supplier_id: string; supplier_name: string }>(
-      `SELECT p.net_amount, p.supplier_id, COALESCE(sup.name, 'Unknown') as supplier_name
-       FROM purchases p
-       LEFT JOIN suppliers sup ON sup.id::text = p.supplier_id::text
-       WHERE p.clinic_id = ? AND p.deleted_at IS NULL AND p.created_at >= ?`,
-      [clinicId, from]
-    );
+    const [purchases, stock, soldM] = await Promise.all([
+      queryRaw<{ net_amount: number; supplier_id: string; supplier_name: string }>(
+        `SELECT p.net_amount, p.supplier_id, COALESCE(sup.name, 'Unknown') as supplier_name
+         FROM purchases p
+         LEFT JOIN suppliers sup ON sup.id::text = p.supplier_id::text
+         WHERE p.clinic_id = ? AND p.deleted_at IS NULL AND p.created_at >= ?`,
+        [clinicId, from]
+      ),
+      queryRaw<{ medicine_id: string; total_stock: number }>(
+        `SELECT medicine_id, SUM(quantity_remaining)::int as total_stock
+         FROM medicine_batches
+         WHERE clinic_id = ? AND deleted_at IS NULL AND quantity_remaining > 0
+         GROUP BY medicine_id`,
+        [clinicId]
+      ),
+      queryRaw<{ medicine_id: string; quantity: number }>(
+        `SELECT si.medicine_id, si.quantity FROM sale_items si
+         INNER JOIN sales s ON s.id::text = si.sale_id::text
+         WHERE si.deleted_at IS NULL AND s.deleted_at IS NULL
+           AND COALESCE(s.is_return, false) = false
+           AND s.clinic_id = ? AND s.created_at >= ?`,
+        [clinicId, startDateFromRange(30)]
+      ),
+    ]);
 
     const bySup: Record<string, { name: string; value: number }> = {};
     for (const p of purchases) {
@@ -306,23 +324,6 @@ analyticsRouter.get('/purchase-intelligence', requireAuth, async (req, res, next
     const top_suppliers_by_value = Object.values(bySup)
       .sort((a, b) => b.value - a.value)
       .slice(0, 10);
-
-    const stock = await queryRaw<{ medicine_id: string; total_stock: number }>(
-      `SELECT medicine_id, SUM(quantity_remaining)::int as total_stock
-       FROM medicine_batches
-       WHERE clinic_id = ? AND deleted_at IS NULL AND quantity_remaining > 0
-       GROUP BY medicine_id`,
-      [clinicId]
-    );
-
-    const soldM = await queryRaw<{ medicine_id: string; quantity: number }>(
-      `SELECT si.medicine_id, si.quantity FROM sale_items si
-       INNER JOIN sales s ON s.id::text = si.sale_id::text
-       WHERE si.deleted_at IS NULL AND s.deleted_at IS NULL
-         AND COALESCE(s.is_return, false) = false
-         AND s.clinic_id = ? AND s.created_at >= ?`,
-      [clinicId, startDateFromRange(30)]
-    );
 
     const soldMap: Record<string, number> = {};
     for (const r of soldM) {

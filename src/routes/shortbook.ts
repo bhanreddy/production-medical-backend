@@ -4,7 +4,20 @@ import { requireAuth } from '../middleware/auth';
 import { requireRole } from '../middleware/rbac';
 import { addToShortbookSchema } from '../schemas/shortbook.schema';
 
+import { ShortbookV2Service } from '../services/inventory/shortbookV2Service';
+
 export const shortbookRouter = Router();
+
+// GET /api/shortbook/consolidated
+shortbookRouter.get('/consolidated', requireAuth, async (req, res, next) => {
+  try {
+    const clinicId = req.user!.clinic_id;
+    const data = ShortbookV2Service.getConsolidatedShortbook(clinicId);
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
 
 // GET /api/shortbook
 shortbookRouter.get('/', requireAuth, async (req, res, next) => {
