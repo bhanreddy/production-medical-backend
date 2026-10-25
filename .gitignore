@@ -24,3 +24,6 @@ logs/
 
 # OS generated files
 .DS_Store
+.catalyst-build/
+.catalyst-qa.json
+app-config.local.json

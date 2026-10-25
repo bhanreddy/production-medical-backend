@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs/promises';
 import { AppError } from '../../lib/appError';
+import { postgresQuery } from '../../lib/postgresDb';
 
 export interface StorageValidationResult {
   isValid: boolean;
@@ -24,11 +25,30 @@ export class PrescriptionStorageService {
   }
   static async save(storageKey: string, buffer: Buffer): Promise<void> {
     const target = this.resolveFile(storageKey);
+    if (process.env.DURABLE_RUNTIME === 'postgres') {
+      await postgresQuery('INSERT INTO app_prescription_documents(storage_key, content) VALUES ($1, $2)', [storageKey, buffer]);
+      return;
+    }
     await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
     await fs.writeFile(target, buffer, { flag: 'wx', mode: 0o600 });
   }
   static async remove(storageKey: string): Promise<void> {
+    if (process.env.DURABLE_RUNTIME === 'postgres') {
+      this.resolveFile(storageKey);
+      await postgresQuery('DELETE FROM app_prescription_documents WHERE storage_key = $1', [storageKey]);
+      return;
+    }
     await fs.unlink(this.resolveFile(storageKey)).catch(() => {});
+  }
+  static async read(storageKey: string): Promise<Buffer> {
+    const target = this.resolveFile(storageKey);
+    if (process.env.DURABLE_RUNTIME === 'postgres') {
+      const [document] = await postgresQuery<{ content: Buffer }>('SELECT content FROM app_prescription_documents WHERE storage_key = $1', [storageKey]);
+      if (!document) throw new AppError(404, 'Prescription document is unavailable');
+      return document.content;
+    }
+    try { return await fs.readFile(target); }
+    catch { throw new AppError(404, 'Prescription document is unavailable'); }
   }
   private static ALLOWED_MIME_TYPES = new Set([
     'image/jpeg',

@@ -2,7 +2,15 @@ import Database from 'better-sqlite3';
 import path from 'path';
 
 const DB_PATH = process.env.LOCAL_DB_PATH || path.join(__dirname, '..', 'local.db');
-export const localDb = new Database(DB_PATH);
+export let localDb = new Database(DB_PATH);
+
+/** Replace the disposable working copy with the current committed cloud checkpoint. */
+export function restoreLocalDb(image: Buffer): void {
+  const replacement = new Database(image);
+  localDb.close();
+  localDb = replacement;
+  initLocalDb();
+}
 
 export function initLocalDb() {
   localDb.exec(`

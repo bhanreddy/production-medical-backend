@@ -1,6 +1,6 @@
 import { resolveCloudStoreContext } from '../services/cloudStoreContext';
 import { transactionalRoute } from '../lib/transactionalRoute';
-import { afterPostgresCommit, localMutate, queryAll, queryOne, queryRaw, queryCount } from '../lib/postgresDb';
+import { beforePostgresCommit, localMutate, queryAll, queryOne, queryRaw, queryCount } from '../lib/postgresDb';
 import { Router } from 'express';
 import { z } from 'zod';
 import { AppError } from '../lib/appError';
@@ -237,7 +237,7 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), transactionalRoute(
       }
 
       // Adjust Enterprise Inventory Position
-      afterPostgresCommit(() => { if (storeId && organizationId) {
+      beforePostgresCommit(() => { if (storeId && organizationId) {
         try {
           InventoryPositionService.adjustStock({
             organizationId,
@@ -607,7 +607,7 @@ purchasesRouter.post('/purchase-returns', requireAuth, requireRole('OWNER'), tra
       // Adjust Enterprise Inventory Position
       const batchStoreId = (batch as any).store_id || null;
       const batchOrgId = (batch as any).organization_id || null;
-      afterPostgresCommit(() => { if (batchStoreId && batchOrgId) {
+      beforePostgresCommit(() => { if (batchStoreId && batchOrgId) {
         try {
           InventoryPositionService.adjustStock({
             organizationId: batchOrgId,

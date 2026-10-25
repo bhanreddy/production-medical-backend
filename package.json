@@ -7,6 +7,9 @@
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
+    "build:catalyst": "node scripts/build-catalyst.cjs",
+    "deploy:catalyst": "catalyst deploy --only appsail --dc in --org 60091775419 -ni",
+    "test:durability": "npm run build && node scripts/test-durable-runtime.cjs",
     "typecheck": "tsc --noEmit",
     "test": "jest --forceExit --detectOpenHandles"
   },

@@ -26,7 +26,7 @@ export async function ensureCloudPosDirectory(
   fullName?: string,
 ): Promise<string | null> {
   const key = `${user.id}:${user.clinic_id || ""}:${user.role}`;
-  const cached = recent.get(key);
+  const cached = process.env.DURABLE_RUNTIME === 'postgres' ? undefined : recent.get(key);
   if (cached && Date.now() - cached.at < 30_000) return cached.organizationId;
   const current = loading.get(key);
   if (current) return current;

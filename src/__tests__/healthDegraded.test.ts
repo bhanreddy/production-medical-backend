@@ -1,6 +1,9 @@
 import express from "express";
 import request from "supertest";
 const mockLimit = jest.fn();
+const originalDatabaseUrl = process.env.DATABASE_URL;
+beforeAll(() => { delete process.env.DATABASE_URL; });
+afterAll(() => { if (originalDatabaseUrl !== undefined) process.env.DATABASE_URL = originalDatabaseUrl; });
 jest.mock("../config/supabase", () => ({
   supabaseAdmin: { from: () => ({ select: () => ({ limit: mockLimit }) }) },
 }));

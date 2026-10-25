@@ -3,6 +3,7 @@ import cors from 'cors';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
 import compression from 'compression';
+import { durableRuntime } from './middleware/durableRuntime';
 import { routes } from './routes';
 
 import { publicRouter } from './routes/public';
@@ -16,6 +17,7 @@ export function createApp(): express.Application {
   initSentry();
 
   const app = express();
+  if (process.env.X_ZOHO_CATALYST_LISTEN_PORT) app.set('trust proxy', 1);
   // gzip holds small writes until its window fills, which would delay live events indefinitely.
   app.use(compression({
     filter: (req, res) =>
@@ -61,7 +63,7 @@ export function createApp(): express.Application {
   app.use('/public', publicRouter);
 
   app.use(['/api/auth/login', '/api/auth/register'], authRateLimit);
-  app.use('/api', apiRateLimit, routes);
+  app.use('/api', apiRateLimit, durableRuntime, routes);
 
   sentryErrorHandler(app);
   app.use(errorHandler);

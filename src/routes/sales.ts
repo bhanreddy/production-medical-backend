@@ -10,6 +10,7 @@ import { resolveCloudStoreContext } from "../services/cloudStoreContext";
 import { transactionalRoute } from "../lib/transactionalRoute";
 import {
   afterPostgresCommit,
+  beforePostgresCommit,
   localMutate,
   localInsertMany,
   queryAll,
@@ -437,7 +438,7 @@ salesRouter.post(
         stockUpdates.set(resolved.resolvedBatchId, newQuantity);
 
         // Adjust Enterprise Inventory Position
-        afterPostgresCommit(() => {
+        beforePostgresCommit(() => {
           if (storeId && organizationId) {
             try {
               InventoryPositionService.adjustStock({
@@ -669,7 +670,7 @@ salesRouter.post(
             });
 
             // Adjust Inventory Position
-            afterPostgresCommit(() => {
+            beforePostgresCommit(() => {
               if (storeId && organizationId) {
                 try {
                   InventoryPositionService.adjustStock({

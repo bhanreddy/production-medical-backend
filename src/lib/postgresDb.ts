@@ -5,16 +5,22 @@ import { AsyncLocalStorage } from "node:async_hooks";
 const transactions = new AsyncLocalStorage<{
   executor: typeof sql;
   afterCommit: Array<() => void>;
+  beforeCommit: Array<() => void | Promise<void>>;
 }>();
 export async function withPostgresTransaction<T>(
   operation: () => Promise<T>,
 ): Promise<T> {
   if (transactions.getStore()) return operation();
   const callbacks: Array<() => void> = [];
+  const beforeCommit: Array<() => void | Promise<void>> = [];
   const result = await sql.begin(async (tx) =>
     transactions.run(
-      { executor: tx as unknown as typeof sql, afterCommit: callbacks },
-      operation,
+      { executor: tx as unknown as typeof sql, afterCommit: callbacks, beforeCommit },
+      async () => {
+        const value = await operation();
+        for (const callback of beforeCommit) await callback();
+        return value;
+      },
     ),
   );
   for (const callback of callbacks) {
@@ -28,6 +34,18 @@ export async function withPostgresTransaction<T>(
     }
   }
   return result as T;
+}
+
+/** Local projections must join the durable checkpoint before its SQL transaction commits. */
+export function beforePostgresCommit(callback: () => void | Promise<void>): void {
+  const transaction = transactions.getStore();
+  if (transaction) transaction.beforeCommit.push(callback);
+  else void callback();
+}
+
+/** Native PostgreSQL parameters, including bytea, without SQLite syntax rewriting. */
+export async function postgresQuery<T = Record<string, any>>(query: string, params: any[] = []): Promise<T[]> {
+  return await (transactions.getStore()?.executor || sql).unsafe(query, params) as unknown as T[];
 }
 export function afterPostgresCommit(callback: () => void): void {
   const transaction = transactions.getStore();

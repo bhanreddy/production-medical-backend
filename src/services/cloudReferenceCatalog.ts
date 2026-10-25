@@ -14,7 +14,7 @@ export function invalidateCloudReferenceCatalog(clinicId: string): void {
 /** Read-only cloud reference projection. Stock and financial balances remain in their owning engines. */
 export async function ensureCloudReferenceCatalog(clinicId: string, organizationId: string): Promise<void> {
   const key = `${clinicId}:${organizationId}`;
-  const previous = cache.get(key);
+  const previous = process.env.DURABLE_RUNTIME === 'postgres' ? undefined : cache.get(key);
   if (previous && Date.now() - previous.at < 30_000) return;
   const current = loading.get(key);
   if (current) return current;

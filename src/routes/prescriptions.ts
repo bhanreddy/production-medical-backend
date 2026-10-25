@@ -40,10 +40,10 @@ prescriptionsRouter.get('/document/signed-proxy', async (req, res, next) => {
     }
     const document = localDb.prepare('SELECT organization_id FROM prescriptions WHERE document_url = ? AND _deleted = 0').get(key) as { organization_id: string } | undefined;
     if (!document || ![organizationId(req), req.user!.clinic_id].includes(document.organization_id)) throw new AppError(404, 'Prescription document not found');
-    const filePath = PrescriptionStorageService.resolveFile(key);
+    const content = await PrescriptionStorageService.read(key);
     res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.sendFile(filePath, err => { if (err) next(new AppError(404, 'Prescription document is unavailable')); });
+    res.type(key.split('.').pop() || 'application/octet-stream').send(content);
   } catch (err) {
     next(err);
   }
