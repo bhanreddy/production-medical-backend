@@ -7,7 +7,7 @@ class RejectedResponse extends Error {}
 /** Buffer the response until both cloud SQL and embedded state are durably committed. */
 export const durableRuntime: RequestHandler = async (req, res, next) => {
   if (process.env.DURABLE_RUNTIME !== 'postgres' ||
-      req.path === '/health' || req.path === '/events/stream') return next();
+      /^\/(health|events\/stream)\/?$/.test(req.path)) return next();
 
   const originalWrite = res.write;
   const originalEnd = res.end;
