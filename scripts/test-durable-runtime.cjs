@@ -16,7 +16,7 @@ Object.assign(process.env, {
 require('dotenv').config({ quiet: true });
 const { withDurableRuntime } = require('../dist/lib/durableRuntime');
 const db = require('../dist/local-db');
-const { postgresQuery } = require('../dist/lib/postgresDb');
+const { postgresQuery, beforePostgresCommit, withPostgresTransaction } = require('../dist/lib/postgresDb');
 const sql = require('../dist/db').default;
 const { PrescriptionStorageService: files } = require('../dist/services/prescription/prescriptionStorageService');
 const key = 'prescriptions/qa/2026/00000000-0000-0000-0000-000000000001.pdf';
@@ -45,6 +45,15 @@ function replica(operation) {
   });
 }
 async function verify() {
+  let ordinaryProjectionRan = false;
+  delete process.env.DURABLE_RUNTIME;
+  await assert.rejects(withPostgresTransaction(async () => {
+    beforePostgresCommit(() => { ordinaryProjectionRan = true; });
+    throw new Error('ordinary transaction rollback');
+  }));
+  assert.equal(ordinaryProjectionRan, false);
+  process.env.DURABLE_RUNTIME = 'postgres';
+  console.log('PASS: ordinary hosting retains after-commit projection semantics');
   await sql.unsafe(fs.readFileSync(path.join(__dirname, '../migrations/020_durable_runtime.sql'), 'utf8'));
   await postgresQuery('DELETE FROM app_runtime_checkpoints WHERE name = $1', [process.env.DURABLE_RUNTIME_KEY]);
   await postgresQuery('DELETE FROM app_prescription_documents WHERE storage_key = $1', [key]);
@@ -105,6 +114,10 @@ async function verify() {
   assert.equal(failed.body.error.code, 'DURABLE_STORAGE_UNAVAILABLE');
   assert.equal(await replica('read'), 10);
   console.log('PASS: HTTP success waits for commit, rejected requests and failed commits preserve state');
+
+  await withDurableRuntime(async () => { beforePostgresCommit(() => { setCounter(11); }); });
+  assert.equal(await replica('read'), 11);
+  console.log('PASS: inventory projection callbacks join the committed checkpoint');
 
   await postgresQuery('DELETE FROM app_prescription_documents WHERE storage_key = $1', [key]);
   await postgresQuery('DELETE FROM app_runtime_checkpoints WHERE name = $1', [process.env.DURABLE_RUNTIME_KEY]);

@@ -2,9 +2,15 @@
 
 The backend is linked to the `medipos` project (78544000000061006), India data center, organization 60091775419.
 
+Production: https://medical-pos-backend-50047153591.catalystappsail.in/api
+
+Development: https://medical-pos-backend-50047153591.development.catalystappsail.in/api
+
 Run `npm run build:catalyst` to compile the source, install locked production dependencies, and prepare the Linux x86-64 SQLite binary for Node 24. The generated `.catalyst-build/` contains an ignored, mode-0600 AppSail configuration populated from `.env` (or `CATALYST_ENV_FILE`). Credentials are sent as AppSail environment variables; the CLI excludes this configuration from the code archive. Never commit the build directory.
 
 Run `npm run deploy:catalyst` to upload to Catalyst Development. Promote the project in the Catalyst console to reach Production. Initial production deployment requires a configured Catalyst payment method. The application binds `X_ZOHO_CATALYST_LISTEN_PORT` and rejects requests until migrations finish.
+
+**Production environment variables are separate.** The first promotion did not copy their values. Configure the required variables from the generated AppSail configuration in the Production environment as well, then verify the health endpoint. Never print or commit their values.
 
 ## Durable state
 

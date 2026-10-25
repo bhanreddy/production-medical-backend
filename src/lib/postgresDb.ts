@@ -38,6 +38,10 @@ export async function withPostgresTransaction<T>(
 
 /** Local projections must join the durable checkpoint before its SQL transaction commits. */
 export function beforePostgresCommit(callback: () => void | Promise<void>): void {
+  if (process.env.DURABLE_RUNTIME !== 'postgres') {
+    afterPostgresCommit(() => { void callback(); });
+    return;
+  }
   const transaction = transactions.getStore();
   if (transaction) transaction.beforeCommit.push(callback);
   else void callback();
