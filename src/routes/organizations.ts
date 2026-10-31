@@ -1,4 +1,5 @@
-import { Router } from 'express';
+import { Router, type Request } from 'express';
+import { AppError } from '../lib/appError';
 import { requireAuth } from '../middleware/auth';
 import { requireRole } from '../middleware/rbac';
 import { localDb } from '../local-db';
@@ -7,21 +8,46 @@ import { InventoryReconciliationService } from '../services/inventoryReconciliat
 import { OrganizationMigrationService } from '../services/organizationMigration';
 
 export const organizationsRouter = Router();
+organizationsRouter.use(requireAuth);
+
+function currentOrganization(req: Request): string | null {
+  const clinic = localDb.prepare('SELECT organization_id FROM clinics WHERE (id = ? OR _local_id = ?) AND _deleted = 0')
+    .get(req.user!.clinic_id, req.user!.clinic_id) as { organization_id?: string } | undefined;
+  return clinic?.organization_id || req.user?.organization_id || null;
+}
+function hasOrganizationAccess(req: Request, orgId: string): boolean {
+  if (req.user!.role === 'SUPER_ADMIN' && !req.user!.isImpersonating) return true;
+  return currentOrganization(req) === orgId || !!localDb.prepare(
+    'SELECT id FROM user_organization_access WHERE user_id = ? AND organization_id = ? AND is_active = 1 AND _deleted = 0'
+  ).get(req.user!.id, orgId);
+}
+// Resource IDs are untrusted, even when the caller is an OWNER of another shop.
+organizationsRouter.param('id', (req, _res, next, id) => {
+  try {
+    const storePath = req.path.startsWith('/stores/');
+    const resource = localDb.prepare(storePath
+      ? 'SELECT id, organization_id FROM stores WHERE (id = ? OR _local_id = ?) AND _deleted = 0'
+      : 'SELECT id, id AS organization_id FROM organizations WHERE (id = ? OR _local_id = ?) AND _deleted = 0'
+    ).get(id, id) as { id: string; organization_id: string } | undefined;
+    if (!resource || !hasOrganizationAccess(req, resource.organization_id)) throw new AppError(404, storePath ? 'Store not found' : 'Organization not found');
+    req.params.id = resource.id;
+    for (const [field, table] of [['region_id', 'regions'], ['parent_region_id', 'regions'], ['counter_id', 'counters']] as const) {
+      if (req.body?.[field] && !localDb.prepare(`SELECT id FROM ${table} WHERE id = ? AND organization_id = ? AND _deleted = 0`)
+        .get(req.body[field], resource.organization_id)) throw new AppError(400, `${field} does not belong to this organization`);
+    }
+    next();
+  } catch (error) { next(error); }
+});
 
 // GET /api/organizations
 organizationsRouter.get('/', requireAuth, async (req, res, next) => {
   try {
-    const clinicId = req.user!.clinic_id;
-    let orgs: any[] = [];
-    if (clinicId) {
-      const clinic: any = localDb.prepare('SELECT organization_id FROM clinics WHERE id = ? OR _local_id = ?').get(clinicId, clinicId);
-      if (clinic?.organization_id) {
-        orgs = localDb.prepare('SELECT * FROM organizations WHERE id = ? OR _local_id = ?').all(clinic.organization_id, clinic.organization_id);
-      }
-    }
-    if (orgs.length === 0) {
-      orgs = localDb.prepare('SELECT * FROM organizations WHERE _deleted = 0').all();
-    }
+    const orgs = req.user!.role === 'SUPER_ADMIN' && !req.user!.isImpersonating
+      ? localDb.prepare('SELECT * FROM organizations WHERE _deleted = 0').all()
+      : localDb.prepare(`SELECT o.* FROM organizations o WHERE o._deleted = 0 AND
+          (o.id = ? OR EXISTS (SELECT 1 FROM user_organization_access a
+            WHERE a.organization_id = o.id AND a.user_id = ? AND a.is_active = 1 AND a._deleted = 0))`)
+        .all(currentOrganization(req), req.user!.id);
     res.json({ data: orgs });
   } catch (err) {
     next(err);
@@ -375,7 +401,13 @@ organizationsRouter.post('/stores/:id/users', requireAuth, requireRole('SUPER_AD
     }
 
     const store: any = localDb.prepare('SELECT organization_id FROM stores WHERE id = ? OR _local_id = ?').get(storeId, storeId);
-    const orgId = store?.organization_id || 'default-org';
+    const orgId = store.organization_id;
+    if (!['STORE_MANAGER', 'PHARMACIST', 'CASHIER', 'DOCTOR', 'STAFF', 'VIEWER'].includes(role)) throw new AppError(400, 'Invalid store role');
+    const member = localDb.prepare(`SELECT u.id FROM users u LEFT JOIN clinics c ON c.id = u.clinic_id
+      WHERE u.id = ? AND u._deleted = 0 AND (c.organization_id = ? OR EXISTS (
+        SELECT 1 FROM user_organization_access a WHERE a.user_id = u.id AND a.organization_id = ? AND a.is_active = 1 AND a._deleted = 0))`)
+      .get(user_id, orgId, orgId);
+    if (!member) throw new AppError(404, 'Organization member not found');
     const id = uuidv4();
     const now = new Date().toISOString();
 
@@ -404,6 +436,13 @@ organizationsRouter.get('/inventory/reconciliation', requireAuth, async (req, re
       return res.status(400).json({ error: 'batch_id query parameter is required' });
     }
 
+    const batch = localDb.prepare('SELECT organization_id, clinic_id FROM medicine_batches WHERE (id = ? OR _local_id = ?) AND _deleted = 0')
+      .get(batchId, batchId) as { organization_id: string; clinic_id: string } | undefined;
+    if (!batch || !(batch.clinic_id === req.user!.clinic_id || hasOrganizationAccess(req, batch.organization_id))) throw new AppError(404, 'Batch not found');
+    if (storeId) {
+      const store = localDb.prepare('SELECT organization_id FROM stores WHERE id = ? AND _deleted = 0').get(storeId) as { organization_id: string } | undefined;
+      if (!store || !hasOrganizationAccess(req, store.organization_id)) throw new AppError(404, 'Store not found');
+    }
     const report = InventoryReconciliationService.reconcileBatch({ batchId, storeId });
     res.json({ data: report });
   } catch (err) {
@@ -414,7 +453,7 @@ organizationsRouter.get('/inventory/reconciliation', requireAuth, async (req, re
 // POST /api/organizations/migrate-tenant
 organizationsRouter.post('/migrate-tenant', requireAuth, requireRole('SUPER_ADMIN', 'OWNER'), async (req, res, next) => {
   try {
-    const clinicId = req.body.clinic_id || req.user!.clinic_id;
+    const clinicId = req.user!.role === 'SUPER_ADMIN' && !req.user!.isImpersonating ? req.body.clinic_id || req.user!.clinic_id : req.user!.clinic_id;
     if (!clinicId) {
       return res.status(400).json({ error: 'clinic_id is required' });
     }

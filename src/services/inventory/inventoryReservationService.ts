@@ -38,6 +38,8 @@ export class InventoryReservationService {
       createdBy = 'SYSTEM',
     } = params;
 
+    if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(durationMinutes) || durationMinutes <= 0) throw new AppError(400, 'Reservation quantity and duration must be positive numbers');
+
     // First, clean any expired reservations
     this.cleanExpiredReservations(organizationId);
 

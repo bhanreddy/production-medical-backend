@@ -1,6 +1,10 @@
 import postgres from 'postgres';
 
-const connectionString = process.env.DATABASE_URL;
+// Importing a mocked route in unit tests must not require a live database or
+// silently load production credentials from .env. Real SQL tests opt in explicitly.
+const connectionString = process.env.DATABASE_URL || (process.env.NODE_ENV === 'test'
+  ? 'postgres://127.0.0.1:1/medical_unconfigured_qa'
+  : undefined);
 if (!connectionString) {
   throw new Error('DATABASE_URL is not set');
 }

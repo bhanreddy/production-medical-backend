@@ -78,8 +78,17 @@ test('patient history and allergies do not reveal or modify records from another
   localDb.prepare('INSERT INTO patient_allergies(id,_local_id,organization_id,patient_id,allergen,active,_updated_at) VALUES(?,?,?,?,?,1,?)').run(allergyId,allergyId,'rx-other-clinic','qa-patient','QA Restricted Allergen',now);
   try {
     const history = await request(app).get('/patients/qa-patient/medication-history');
-    expect(history.status).toBe(200); expect(history.body.data.allergies).toEqual([]);
-    expect((await request(app).get('/patients/qa-patient/allergies')).body.data).toEqual([]);
+    expect(history.status).toBe(404);
+    expect((await request(app).get('/patients/qa-patient/allergies')).status).toBe(404);
     expect((await request(app).post('/patients/qa-patient/allergies').send({allergen:'QA Allergy'})).status).toBe(404);
   } finally { localDb.prepare('DELETE FROM patient_allergies WHERE id = ?').run(allergyId); }
+});
+
+test('patient history resolves a real patient and accepts every severity exposed in the form', async () => {
+ const id=crypto.randomUUID(),now=new Date().toISOString();
+ localDb.prepare('INSERT INTO customers(id,_local_id,organization_id,clinic_id,name,_updated_at) VALUES(?,?,?,?,?,?)').run(id,id,'rx-test-clinic','rx-test-clinic','QA named patient',now);
+ try {
+  const history=await request(app).get(`/patients/${id}/medication-history`);expect(history.status).toBe(200);expect(history.body.data.patientName).toBe('QA named patient');
+  expect((await request(app).post(`/patients/${id}/allergies`).send({allergen:'QA synthetic allergen',severity:'ANAPHYLAXIS'})).status).toBe(201);
+ } finally {localDb.prepare('DELETE FROM patient_allergies WHERE patient_id=?').run(id);localDb.prepare('DELETE FROM customers WHERE id=?').run(id);}
 });

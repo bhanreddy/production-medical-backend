@@ -1,4 +1,6 @@
-import { Router } from 'express';
+import { Router, type Request } from 'express';
+import { z } from 'zod';
+import { AppError } from '../lib/appError';
 import { requireAuth } from '../middleware/auth';
 import { requireRole } from '../middleware/rbac';
 import { localDb } from '../local-db';
@@ -7,30 +9,43 @@ import { BARCODE_TYPES, PRODUCT_UNITS } from '../domain/units';
 
 export const barcodesRouter = Router();
 
+function organizationId(req: Request): string {
+  const clinic = localDb.prepare('SELECT organization_id FROM clinics WHERE (id = ? OR _local_id = ?) AND _deleted = 0')
+    .get(req.user!.clinic_id, req.user!.clinic_id) as { organization_id?: string } | undefined;
+  const id = clinic?.organization_id || req.user?.organization_id;
+  if (!id) throw new AppError(403, 'Choose a pharmacy before managing barcodes');
+  return id;
+}
+function findMedicine(id: string, orgId: string) {
+  return localDb.prepare('SELECT * FROM medicines WHERE (id = ? OR _local_id = ?) AND organization_id = ? AND _deleted = 0 AND is_active = 1')
+    .get(id, id, orgId) as { id: string } | undefined;
+}
+const barcodeSchema = z.object({
+  medicine_id: z.string().min(1), barcode: z.string().trim().min(1).max(128),
+  barcode_type: z.enum(BARCODE_TYPES).default('MANUFACTURER'),
+  unit_type: z.enum(PRODUCT_UNITS).default('STRIP'),
+  conversion_factor: z.number().finite().positive().default(1),
+  is_primary: z.boolean().default(false),
+});
+
 // GET /api/barcodes/lookup?code=
 barcodesRouter.get('/lookup', requireAuth, async (req, res, next) => {
   try {
-    const code = (req.query.code as string)?.trim();
+    const code = typeof req.query.code === 'string' ? req.query.code.trim() : '';
     if (!code) {
       return res.status(400).json({ error: 'code query param is required' });
     }
 
-    const clinicId = req.user!.clinic_id;
-    let orgId = 'default-org';
-    if (clinicId) {
-      const clinic: any = localDb.prepare('SELECT organization_id FROM clinics WHERE id = ? OR _local_id = ?').get(clinicId, clinicId);
-      if (clinic?.organization_id) orgId = clinic.organization_id;
-    }
+    const orgId = organizationId(req);
 
     // Check alternate barcodes first
     const barcodeRow: any = localDb
-      .prepare('SELECT * FROM product_barcodes WHERE barcode = ? AND (organization_id = ? OR organization_id = "default-org") AND _deleted = 0')
+      .prepare('SELECT * FROM product_barcodes WHERE barcode = ? AND organization_id = ? AND _deleted = 0')
       .get(code, orgId);
 
     if (barcodeRow) {
-      const medicine: any = localDb
-        .prepare('SELECT * FROM medicines WHERE id = ? OR _local_id = ?')
-        .get(barcodeRow.medicine_id, barcodeRow.medicine_id);
+      const medicine = findMedicine(barcodeRow.medicine_id, orgId);
+      if (!medicine) throw new AppError(404, 'Product not found for barcode');
 
       return res.json({
         data: {
@@ -43,8 +58,8 @@ barcodesRouter.get('/lookup', requireAuth, async (req, res, next) => {
 
     // Fallback: Check primary barcode on medicines table
     const medicineRow: any = localDb
-      .prepare('SELECT * FROM medicines WHERE (barcode = ? OR primary_barcode = ?) AND _deleted = 0')
-      .get(code, code);
+      .prepare('SELECT * FROM medicines WHERE primary_barcode = ? AND organization_id = ? AND _deleted = 0 AND is_active = 1')
+      .get(code, orgId);
 
     if (medicineRow) {
       return res.json({
@@ -71,10 +86,13 @@ barcodesRouter.get('/lookup', requireAuth, async (req, res, next) => {
 // GET /api/barcodes/medicine/:medicineId
 barcodesRouter.get('/medicine/:medicineId', requireAuth, async (req, res, next) => {
   try {
-    const medId = req.params.medicineId;
+    const orgId = organizationId(req);
+    const medicine = findMedicine(req.params.medicineId, orgId);
+    if (!medicine) throw new AppError(404, 'Medicine not found');
+    const medId = medicine.id;
     const barcodes = localDb
-      .prepare('SELECT * FROM product_barcodes WHERE (medicine_id = ? OR medicine_id IN (SELECT id FROM medicines WHERE _local_id = ?)) AND _deleted = 0')
-      .all(medId, medId);
+      .prepare('SELECT * FROM product_barcodes WHERE medicine_id = ? AND organization_id = ? AND _deleted = 0')
+      .all(medId, orgId);
     res.json({ data: barcodes });
   } catch (err) {
     next(err);
@@ -84,30 +102,15 @@ barcodesRouter.get('/medicine/:medicineId', requireAuth, async (req, res, next) 
 // POST /api/barcodes
 barcodesRouter.post('/', requireAuth, requireRole('PHARMACIST', 'OWNER'), async (req, res, next) => {
   try {
-    const {
-      medicine_id,
-      barcode,
-      barcode_type = 'MANUFACTURER',
-      unit_type = 'STRIP',
-      conversion_factor = 1.0,
-      is_primary = false,
-    } = req.body;
-
-    if (!medicine_id || !barcode) {
-      return res.status(400).json({ error: 'medicine_id and barcode are required' });
-    }
-
-    const clinicId = req.user!.clinic_id;
-    let organizationId = 'default-org';
-    if (clinicId) {
-      const clinic: any = localDb.prepare('SELECT organization_id FROM clinics WHERE id = ? OR _local_id = ?').get(clinicId, clinicId);
-      if (clinic?.organization_id) organizationId = clinic.organization_id;
-    }
+    const { medicine_id, barcode, barcode_type, unit_type, conversion_factor, is_primary } = barcodeSchema.parse(req.body);
+    const orgId = organizationId(req);
+    const medicine = findMedicine(medicine_id, orgId);
+    if (!medicine) throw new AppError(404, 'Medicine not found');
 
     // Check duplicate within organization
     const existing: any = localDb
       .prepare('SELECT * FROM product_barcodes WHERE organization_id = ? AND barcode = ? AND _deleted = 0')
-      .get(organizationId, barcode);
+      .get(orgId, barcode);
 
     if (existing) {
       return res.status(409).json({ error: `Barcode ${barcode} already registered in organization` });
@@ -126,8 +129,8 @@ barcodesRouter.post('/', requireAuth, requireRole('PHARMACIST', 'OWNER'), async 
       .run(
         id,
         id,
-        organizationId,
-        medicine_id,
+        orgId,
+        medicine.id,
         barcode,
         barcode_type,
         unit_type,

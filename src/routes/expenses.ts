@@ -64,8 +64,8 @@ expensesRouter.get("/summary", requireAuth, async (req, res, next) => {
 // GET /api/expenses
 expensesRouter.get("/", requireAuth, async (req, res, next) => {
   try {
-    const page = parseInt(req.query.page as string) || 1;
-    const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.max(1, Math.min(parseInt(req.query.limit as string) || 20, 100));
     const store_id = req.query.store_id as string;
 
     const values: any[] = [];
@@ -87,6 +87,11 @@ expensesRouter.get("/", requireAuth, async (req, res, next) => {
     }
     if (req.query.payment_mode) {
       conditions.push("payment_mode=$" + values.push(req.query.payment_mode));
+    }
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    if (q) {
+      const pattern = `%${q}%`;
+      conditions.push(`(description ILIKE $${values.push(pattern)} OR category ILIKE $${values.push(pattern)})`);
     }
 
     const where = conditions.join(" AND ");

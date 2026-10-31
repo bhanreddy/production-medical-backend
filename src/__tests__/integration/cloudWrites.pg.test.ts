@@ -72,7 +72,7 @@ describePg("Cloud documents against PostgreSQL", () => {
   beforeAll(async () => {
     await sql`INSERT INTO auth.users(id) VALUES(${user})`;
     await sql`INSERT INTO clinics(id,_local_id,name,slug) VALUES(${clinic},${clinic},'Write QA',${clinic})`;
-    await sql`INSERT INTO users(id,_local_id,clinic_id,full_name,role) VALUES(${user},${user},${clinic},'Write QA owner','OWNER')`;
+    await sql`INSERT INTO users(id,_local_id,clinic_id,full_name,email,role) VALUES(${user},${user},${clinic},'Write QA owner',${`${user}@example.invalid`},'OWNER')`;
     localDb
       .prepare(
         "INSERT INTO users(id,_local_id,clinic_id,role,_updated_at) VALUES(?,?,?,?,?)",
@@ -107,6 +107,11 @@ describePg("Cloud documents against PostgreSQL", () => {
     await sql`DELETE FROM auth.users WHERE id = ${user}`;
     localDb.prepare("DELETE FROM users WHERE id = ?").run(user);
     await sql.end();
+  });
+  test("schedule-H1 report executes with PostgreSQL boolean columns", async () => {
+    const response = await get('/reports/schedule-h1');
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual([]);
   });
   test("201 is sent only after invoice, items, ledger and stock persist", async () => {
     const res = await post("/sales", { paid_amount: 40, items: [line(2)] });
@@ -283,6 +288,27 @@ describePg("Cloud documents against PostgreSQL", () => {
       ),
     ).toBe(0);
   });
+  test("GST summaries reconcile inclusive prices, bill discounts, returns and purchase discounts", async () => {
+    const period = { from: '2030-01-01T00:00:00Z', to: '2030-12-31T23:59:59Z' };
+    const invoiceId = randomUUID(), returnId = randomUUID();
+    for (const [id, amount, isReturn] of [[invoiceId, 112, false], [returnId, 56, true]] as const) {
+      await sql`INSERT INTO sales(id,_local_id,clinic_id,invoice_number,subtotal,net_amount,is_return,created_at) VALUES(${id},${id},${clinic},${id},${amount},${amount},${isReturn},'2030-06-01')`;
+      const itemId = randomUUID();
+      // Header amount includes a bill-level discount from the line's original gross total.
+      await sql`INSERT INTO sale_items(id,_local_id,clinic_id,sale_id,medicine_id,batch_id,quantity,unit_price,gst_rate,total) VALUES(${itemId},${itemId},${clinic},${id},${med},${batch},1,140,12,140)`;
+    }
+    const salesGst = await get(`/reports/gst-sales?${new URLSearchParams(period)}`);
+    expect(salesGst.status).toBe(200);
+    expect(salesGst.body.data).toEqual([{gst_rate:12,taxable_amount:50,cgst:3,sgst:3,total_gst:6,gross_amount:56}]);
+    const purchase = await post('/purchases', {supplier_id:supplier,invoice_number:randomUUID(),invoice_date:'2030-06-01',items:[{medicine_id:med,batch_number:randomUUID(),expiry_date:'2031-12-31',quantity:2,purchase_price:100,mrp:150,gst_rate:12,discount:10}]});
+    expect(purchase.status).toBe(201);
+    expect(Number(purchase.body.data.discount)).toBe(20);
+    expect(Number(purchase.body.data.net_amount)).toBe(201.6);
+    await sql`UPDATE purchases SET created_at='2030-06-01' WHERE id=${purchase.body.data.id}`;
+    const purchaseGst = await get(`/reports/gst-purchases?${new URLSearchParams(period)}`);
+    expect(purchaseGst.status).toBe(200);
+    expect(purchaseGst.body.data).toEqual([{gst_rate:12,taxable_amount:180,cgst:10.8,sgst:10.8,total_gst:21.6,gross_amount:201.6}]);
+  });
   test("supplier optional fields and expense location context are valid", async () => {
     expect(
       (await post("/suppliers", { name: "Optional QA supplier" })).status,
@@ -303,6 +329,9 @@ describePg("Cloud documents against PostgreSQL", () => {
   });
   test("invoice HTML never discloses another clinic invoice", async () => {
     const otherUser = randomUUID(), otherClinic = randomUUID();
+    await sql`INSERT INTO auth.users(id) VALUES(${otherUser})`;
+    await sql`INSERT INTO clinics(id,_local_id,name,slug) VALUES(${otherClinic},${otherClinic},'Other QA',${otherClinic})`;
+    await sql`INSERT INTO users(id,_local_id,clinic_id,full_name,email,role) VALUES(${otherUser},${otherUser},${otherClinic},'Other QA owner',${`${otherUser}@example.invalid`},'OWNER')`;
     localDb.prepare('INSERT INTO users(id,_local_id,clinic_id,role,_updated_at) VALUES(?,?,?,?,?)').run(otherUser, otherUser, otherClinic, 'OWNER', new Date().toISOString());
     const otherToken = jwt.sign(
       { sub: otherUser, clinic_id: otherClinic, role: "OWNER" },
@@ -313,7 +342,12 @@ describePg("Cloud documents against PostgreSQL", () => {
       .get(`/sales/${sale.id}/invoice`)
       .set("Authorization", `Bearer ${otherToken}`);
       expect(response.status).toBe(404);
-    } finally { localDb.prepare('DELETE FROM users WHERE id = ?').run(otherUser); }
+    } finally {
+      localDb.prepare('DELETE FROM users WHERE id = ?').run(otherUser);
+      await sql`DELETE FROM users WHERE id = ${otherUser}`;
+      await sql`DELETE FROM clinics WHERE id = ${otherClinic}`;
+      await sql`DELETE FROM auth.users WHERE id = ${otherUser}`;
+    }
   });
   test("receipts reduce invoice and party balances exactly once under concurrency", async () => {
     const customer = await post("/customers", {
@@ -374,7 +408,7 @@ describePg("Cloud documents against PostgreSQL", () => {
     const response = await get("/reports/dashboard");
     expect(response.status).toBe(200);
     const [expected] =
-      await sql`SELECT SUM(CASE WHEN is_return THEN -net_amount ELSE net_amount END) AS revenue FROM sales WHERE clinic_id=${clinic}`;
+      await sql`SELECT SUM(CASE WHEN is_return THEN -net_amount ELSE net_amount END) AS revenue FROM sales WHERE clinic_id=${clinic} AND (created_at AT TIME ZONE 'Asia/Kolkata')::date = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date`;
     expect(response.body.data.today_revenue).toBeCloseTo(
       Number(expected.revenue),
       2,

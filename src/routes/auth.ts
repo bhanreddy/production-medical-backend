@@ -11,51 +11,6 @@ authRouter.get('/me', requireAuth, (req, res) => {
   res.json({ user: req.user });
 });
 
-// POST /register - 3-step wizard
-authRouter.post('/register', async (req, res, next) => {
-  try {
-    const { clinic_name, slug, phone, email, full_name, password, gstin, drug_licence_number } = req.body;
-    
-    // 1. Create Clinic
-    const { data: clinic, error: clinicError } = await supabaseAdmin.from('clinics').insert([{
-      name: clinic_name, slug, phone, email, gstin, drug_licence_number, plan: 'trial'
-    }]).select().single();
-    if (clinicError) throw clinicError;
-
-    // 2. Create Supabase User
-    const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
-      email, password, email_confirm: true
-    });
-    if (authError) throw authError;
-
-    // 3. Create Users Row
-    const { data: user, error: userError } = await supabaseAdmin.from('users').insert([{
-      id: authData.user.id,
-      clinic_id: clinic.id,
-      full_name,
-      phone,
-      role: 'OWNER'
-    }]).select().single();
-    if (userError) throw userError;
-
-    // --- PHASE 6 : AUTO-CREATE TRIAL ---
-    const trialEnd = new Date();
-    trialEnd.setDate(trialEnd.getDate() + 14);
-
-    await supabaseAdmin.from('clinic_subscriptions').insert({
-      clinic_id: clinic.id,
-      plan_name: 'trial',
-      status: 'trial',
-      billing_cycle: 'monthly',
-      trial_end: trialEnd.toISOString(),
-    });
-
-    res.json({ clinic, user });
-  } catch (err) {
-    next(err);
-  }
-});
-
 import { enforcePlan } from '../middleware/planEnforcement';
 
 // POST /invite - Invite user to clinic

@@ -16,13 +16,13 @@ import Anthropic from '@anthropic-ai/sdk';
 import { parse as parseCsv } from 'csv-parse/sync';
 
 export const purchasesRouter = Router();
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1, fields: 25 } });
 
 // GET /api/purchases
 purchasesRouter.get('/', requireAuth, async (req, res, next) => {
   try {
-    const page = parseInt(req.query.page as string) || 1;
-    const limit = Math.min(parseInt(req.query.limit as string) || 20, 500);
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.max(1, Math.min(parseInt(req.query.limit as string) || 20, 500));
     const supplier_id = req.query.supplier_id as string;
     const from = req.query.from as string;
     const to = req.query.to as string;
@@ -36,6 +36,12 @@ purchasesRouter.get('/', requireAuth, async (req, res, next) => {
     if (status) { conditions.push('p.payment_status = ?'); values.push(status); }
     if (from) { conditions.push('p.created_at >= ?'); values.push(from); }
     if (to) { conditions.push('p.created_at <= ?'); values.push(to); }
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    if (q) {
+      conditions.push(`(p.invoice_number ILIKE ? OR p.bill_number ILIKE ? OR p.payment_status ILIKE ? OR EXISTS (
+        SELECT 1 FROM suppliers vendor WHERE vendor.id = p.supplier_id AND vendor.clinic_id = p.clinic_id AND vendor.name ILIKE ?))`);
+      values.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
+    }
 
     const where = conditions.join(' AND ');
     const offset = (page - 1) * limit;
@@ -87,6 +93,8 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), transactionalRoute(
     // Server-side Money calculations
     let subtotal = 0;
     let gst_amount = 0;
+    let discount = 0;
+    let total = 0;
     const calculatedLines = parsed.items.map(item => {
       const lineCalc = Money.calculateLineItem({
         quantity: item.quantity,
@@ -96,10 +104,12 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), transactionalRoute(
       });
       subtotal = Money.add(subtotal, Money.multiply(item.quantity, item.purchase_price));
       gst_amount = Money.add(gst_amount, lineCalc.gstAmount);
+      discount = Money.add(discount, lineCalc.discountAmount);
+      total = Money.add(total, lineCalc.total);
       return { item, lineCalc };
     });
 
-    const net_amount = Money.round2(subtotal + gst_amount);
+    const net_amount = Money.round2(total);
     const grand_total = net_amount;
 
     // Resolve supplier_id
@@ -130,7 +140,7 @@ purchasesRouter.post('/', requireAuth, requireRole('OWNER'), transactionalRoute(
         bill_image_url: parsed.bill_image_url,
         notes: parsed.notes,
         subtotal,
-        discount: 0,
+        discount,
         gst_amount,
         net_amount,
         grand_total,

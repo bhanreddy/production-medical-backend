@@ -21,16 +21,16 @@ export const suppliersRouter = Router();
 // GET /api/suppliers
 suppliersRouter.get("/", requireAuth, async (req, res, next) => {
   try {
-    const page = parseInt(req.query.page as string) || 1;
-    const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
-    const q = req.query.q as string;
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.max(1, Math.min(parseInt(req.query.limit as string) || 20, 100));
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
 
     const clinicId = req.user!.clinic_id!;
     const conditions: string[] = ["clinic_id=?"];
     const values: any[] = [clinicId];
     if (q) {
-      conditions.push("name ILIKE ?");
-      values.push(`%${q}%`);
+      conditions.push("(name ILIKE ? OR phone ILIKE ? OR gstin ILIKE ? OR email ILIKE ?)");
+      values.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
     }
 
     const where = conditions.length > 0 ? conditions.join(" AND ") : "";
@@ -41,7 +41,7 @@ suppliersRouter.get("/", requireAuth, async (req, res, next) => {
     if (where) {
       queryStr += ` AND (${where})`;
     }
-    queryStr += ` ORDER BY name ASC LIMIT ? OFFSET ?`;
+    queryStr += ` ORDER BY name ASC, id ASC LIMIT ? OFFSET ?`;
 
     const data = await queryRaw(queryStr, [...values, limit, offset]);
 

@@ -151,7 +151,7 @@ export class POSSearchService {
       const primaryBarcodeRows: any[] = localDb
         .prepare(
           `SELECT * FROM medicines 
-           WHERE primary_barcode = ? AND (organization_id = ? OR organization_id IS NULL) AND is_active = 1 AND _deleted = 0`
+           WHERE primary_barcode = ? AND (organization_id = ?) AND is_active = 1 AND _deleted = 0`
         )
         .all(cleanBarcode, organizationId);
 

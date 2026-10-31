@@ -1,10 +1,11 @@
 import { z } from 'zod';
+import { dateOnlySchema } from './date.schema';
 
 const baseExpenseSchema = z.object({
   category: z.enum(['rent', 'salary', 'utilities', 'supplies', 'maintenance', 'misc']),
   description: z.string().optional().nullable(),
-  amount: z.number().positive(),
-  expense_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  amount: z.number().finite().positive(),
+  expense_date: dateOnlySchema,
   payment_mode: z.enum(['cash', 'upi', 'card', 'bank_transfer']).default('cash'),
   store_id: z.string().optional().nullable(),
   counter_id: z.string().optional().nullable(),

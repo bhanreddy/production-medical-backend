@@ -18,12 +18,13 @@ import sql from '../../db';
 import * as persistence from '../../lib/postgresDb';
 import { salesRouter } from '../../routes/sales';
 import { inventoryRouter } from '../../routes/inventory';
+import { reportsRouter } from '../../routes/reports';
 import { errorHandler } from '../../middleware/errorHandler';
 
 (database ? describe : describe.skip)('Billing performance with real PostgreSQL transactions', () => {
   const medicines = Array.from({ length: 10 }, () => ({ id: randomUUID(), batch: randomUUID() }));
   const app = express(); app.use(express.json()); app.use('/sales', salesRouter);
-  app.use('/inventory', inventoryRouter); app.use(errorHandler);
+  app.use('/inventory', inventoryRouter); app.use('/reports', reportsRouter); app.use(errorHandler);
   const lines = medicines.map(medicine => ({ medicine_id: medicine.id, batch_id: medicine.batch, quantity: 2, mrp: 20, gst_rate: 12 }));
   afterEach(() => jest.restoreAllMocks());
   beforeAll(async () => {
@@ -50,7 +51,7 @@ import { errorHandler } from '../../middleware/errorHandler';
     const req = { user: { clinic_id: clinic }, method: 'POST', originalUrl: '/api/sales' } as any;
     const res = { status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() } as any;
     const next = jest.fn();
-    await sql`INSERT INTO subscription_plans(name, limits) VALUES(${clinic},${sql.json({ max_daily_bills: 100 })})`;
+    await sql`INSERT INTO subscription_plans(name, display_name, limits) VALUES(${clinic},'QA plan',${sql.json({ max_daily_bills: 100 })})`;
     await sql`INSERT INTO clinic_subscriptions(clinic_id, status, plan_name) VALUES(${clinic},'active',${clinic})`;
     const spy = jest.spyOn(persistence, 'queryRaw');
     await enforcePlan(req, res, next);
@@ -63,6 +64,16 @@ import { errorHandler } from '../../middleware/errorHandler';
     expect(res.status).toHaveBeenCalledWith(402);
     expect(next).not.toHaveBeenCalled();
     spy.mockRestore();
+  });
+  test('an empty sales calendar reports zero invoices, and out-of-stock medicines are counted', async () => {
+    const empty = await request(app).get('/reports/dashboard');
+    expect(empty.status).toBe(200);
+    expect(empty.body.data.today_bills).toBe(0);
+    expect(empty.body.data.daily_chart).toHaveLength(7);
+    expect(empty.body.data.daily_chart.every((day: {bills:number}) => day.bills === 0)).toBe(true);
+    await sql`UPDATE medicine_batches SET quantity_remaining = 0 WHERE id = ${medicines[9].batch}`;
+    expect((await request(app).get('/reports/dashboard')).body.data.low_stock_count).toBe(1);
+    await sql`UPDATE medicine_batches SET quantity_remaining = 50 WHERE id = ${medicines[9].batch}`;
   });
   test('search returns sellable batches and correct stock in one query, including barcode and empty stock', async () => {
     const spy = jest.spyOn(persistence, 'queryRaw');

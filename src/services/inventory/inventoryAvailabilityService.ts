@@ -1,4 +1,5 @@
 // inventoryAvailabilityService.ts — Centralized Inventory Availability Service
+import { AppError } from '../../lib/appError';
 import { localDb } from '../../local-db';
 import {
   InventoryAvailabilityResult,
@@ -32,10 +33,11 @@ export class InventoryAvailabilityService {
     } = params;
 
     const medRow: any = localDb
-      .prepare('SELECT id, name FROM medicines WHERE id = ? OR _local_id = ?')
-      .get(medicineId, medicineId);
+      .prepare('SELECT id, name FROM medicines WHERE (id = ? OR _local_id = ?) AND organization_id = ? AND _deleted = 0')
+      .get(medicineId, medicineId, organizationId);
 
-    const medicineName = medRow?.name || 'Unknown Medicine';
+    if (!medRow) throw new AppError(404, 'Medicine not found');
+    const medicineName = medRow.name;
     const targetId = locationType === 'STORE' ? storeId : warehouseId;
     const locationCol = locationType === 'STORE' ? 'store_id' : 'warehouse_id';
 
@@ -72,12 +74,12 @@ export class InventoryAvailabilityService {
         AND ip.organization_id = ? 
         AND ip.location_type = ? 
         AND ${targetId ? `ip.${locationCol} = ?` : `ip.${locationCol} IS NULL`}
-      WHERE mb.medicine_id = ? AND (mb._deleted = 0 OR mb._deleted IS NULL) AND (mb.is_disposed = 0 OR mb.is_disposed IS NULL)
+      WHERE mb.medicine_id = ? AND (mb.organization_id = ? OR mb.organization_id IS NULL) AND (mb._deleted = 0 OR mb._deleted IS NULL) AND (mb.is_disposed = 0 OR mb.is_disposed IS NULL)
     `;
 
     const queryParams: any[] = targetId
-      ? [targetId, targetId, targetId, targetId, organizationId, locationType, targetId, medicineId]
-      : [null, null, null, null, organizationId, locationType, medicineId];
+      ? [targetId, targetId, targetId, targetId, organizationId, locationType, targetId, medRow.id, organizationId]
+      : [null, null, null, null, organizationId, locationType, medRow.id, organizationId];
 
     if (batchId) {
       batchQuery += ` AND (mb.id = ? OR mb._local_id = ?)`;
@@ -109,7 +111,7 @@ export class InventoryAvailabilityService {
       const onHold = Number(b.pos_on_hold || 0);
       const stocktakeLocked = Number(b.pos_stocktake_locked || 0);
 
-      const isExpired = b.expiry_date ? String(b.expiry_date) <= todayStr : false;
+      const isExpired = b.expiry_date ? String(b.expiry_date) < todayStr : false;
       const isRecalled = isProductRecalled || recalledBatchIds.has(b.id) || recalled > 0;
       const isQuarantined = quarantined > 0;
       const isDamaged = damaged > 0;

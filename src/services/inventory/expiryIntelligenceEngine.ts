@@ -69,9 +69,9 @@ export class ExpiryIntelligenceEngine {
       JOIN medicines m ON m.id = mb.medicine_id
       LEFT JOIN inventory_positions ip ON ip.batch_id = mb.id AND ip.organization_id = ?
       WHERE (mb._deleted = 0 OR mb._deleted IS NULL) AND (mb.is_disposed = 0 OR mb.is_disposed IS NULL)
-        AND mb.expiry_date <= ? AND mb.quantity_remaining > 0
+        AND mb.expiry_date <= ? AND mb.quantity_remaining > 0 AND mb.organization_id = ? AND m.organization_id = ?
     `;
-    const queryParams: any[] = [organizationId, maxDateStr];
+    const queryParams: any[] = [organizationId, maxDateStr, organizationId, organizationId];
 
     if (storeId) {
       query += ` AND (mb.store_id = ? OR ip.store_id = ?)`;

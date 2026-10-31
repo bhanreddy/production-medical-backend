@@ -1,3 +1,4 @@
+jest.mock('../config/supabase', () => ({ supabaseAdmin: { from: () => ({ select: () => ({ limit: async () => ({ error: null }) }) }) } }));
 import request from 'supertest';
 import express from 'express';
 

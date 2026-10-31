@@ -1,5 +1,8 @@
 import { Request, Response } from 'express';
-import bcrypt from 'bcryptjs';
+import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
+import sql from '../db';
+import { AppError } from '../lib/appError';
 import jwt from 'jsonwebtoken';
 import { createClient } from '@supabase/supabase-js';
 import { supabaseAdmin } from '../config/supabase';
@@ -12,72 +15,60 @@ const generateTokens = (user: any, clinic_id: string, plan: string) => {
     role: user.role,
     plan
   };
-  // Fallback to a default secret if not set, but in production it should throw
-  const secret = process.env.JWT_SECRET || 'fallback_secret_do_not_use_in_prod';
+  const secret = process.env.JWT_SECRET;
+  if (!secret) throw new AppError(503, 'Authentication is not configured. Contact support.');
   const refreshSecret = process.env.JWT_REFRESH_SECRET || secret;
   
-  const accessToken = jwt.sign(payload, secret, { expiresIn: '15m' });
-  const refreshToken = jwt.sign(payload, refreshSecret, { expiresIn: '30d' });
+  const accessToken = jwt.sign({ ...payload, token_use: 'access' }, secret, { expiresIn: '15m' });
+  const refreshToken = jwt.sign({ ...payload, token_use: 'refresh' }, refreshSecret, { expiresIn: '30d' });
   
   return { accessToken, refreshToken };
 };
 
+const registrationSchema = z.object({
+  email: z.string().trim().email().max(254), password: z.string().min(8).max(128),
+  full_name: z.string().trim().min(2).max(200), clinic_name: z.string().trim().min(3).max(200),
+  phone: z.string().regex(/^[6-9]\d{9}$/),
+  slug: z.string().min(3).max(80).regex(/^[a-z0-9-]+$/).optional(),
+  gstin: z.string().length(15).optional().or(z.literal('')),
+  drug_licence_number: z.string().max(100).optional(),
+});
+
 export const register = async (req: Request, res: Response) => {
+  const parsed = registrationSchema.safeParse({ ...req.body, full_name: req.body?.full_name || req.body?.name });
+  if (!parsed.success) return res.status(400).json({ error: 'Please check your registration details.', details: parsed.error.flatten().fieldErrors });
+  const input = parsed.data;
+  let authUserId: string | undefined;
   try {
-    const { email, password, name, clinic_name } = req.body;
-    if (!email || !password || !name || !clinic_name) {
-      return res.status(400).json({ success: false, error: 'Missing required fields' });
-    }
-
-    // Hash password
-    const salt = await bcrypt.genSalt(12);
-    const hashedPassword = await bcrypt.hash(password, salt);
-
-    // Create Clinic
-    const { data: clinic, error: clinicErr } = await supabaseAdmin
-      .from('clinics')
-      .insert({ name: clinic_name, plan: 'trial' })
-      .select()
-      .single();
-
-    if (clinicErr || !clinic) {
-      return res.status(500).json({ success: false, error: 'Failed to create clinic' });
-    }
-
-    // Create User
-    const { data: user, error: userErr } = await supabaseAdmin
-      .from('clinic_users')
-      .insert({
-        clinic_id: clinic.id,
-        email,
-        password: hashedPassword,
-        name,
-        role: 'owner'
-      })
-      .select()
-      .single();
-
-    if (userErr || !user) {
-      // Rollback clinic if user creation fails
-      await supabaseAdmin.from('clinics').delete().eq('id', clinic.id);
-      return res.status(500).json({ success: false, error: 'Failed to create user' });
-    }
-
-    const { accessToken, refreshToken } = generateTokens(user, clinic.id, clinic.plan);
-
-    res.cookie('refreshToken', refreshToken, { httpOnly: true, secure: process.env.NODE_ENV === 'production', maxAge: 30 * 24 * 60 * 60 * 1000 });
-
-    return res.status(201).json({
-      success: true,
-      data: {
-        user: { id: user.id, email: user.email, name: user.name, role: user.role },
-        clinic: { id: clinic.id, name: clinic.name, plan: clinic.plan },
-        accessToken
-      }
+    const existing = await sql`SELECT id FROM users WHERE LOWER(email) = LOWER(${input.email}) AND deleted_at IS NULL LIMIT 1`;
+    if (existing.length) return res.status(409).json({ error: 'An account with this email already exists. Please sign in.' });
+    // Use a separate client: signing up must never replace the server's service-role session.
+    const client = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, { auth: { autoRefreshToken: false, persistSession: false } });
+    const { data, error } = await client.auth.signUp({ email: input.email, password: input.password,
+      options: { data: { full_name: input.full_name, shop_name: input.clinic_name, phone: input.phone } } });
+    if (error || !data.user) return res.status(400).json({ error: 'Could not create this account. Check your details or sign in if already registered.' });
+    if (data.user.identities?.length === 0) return res.status(409).json({ error: 'An account with this email already exists. Please sign in.' });
+    authUserId = data.user.id;
+    const clinicId = randomUUID();
+    const slug = input.slug || `pharmacy-${clinicId}`;
+    const trialEnd = new Date(Date.now() + 14 * 86400000).toISOString();
+    const result = await sql.begin(async tx => {
+      const [clinic] = await tx`INSERT INTO clinics(id,_local_id,name,slug,phone,email,gstin,drug_licence_number,plan,trial_ends_at)
+        VALUES(${clinicId},${clinicId},${input.clinic_name},${slug},${input.phone},${input.email},${input.gstin || null},${input.drug_licence_number || null},'trial',${trialEnd}) RETURNING id,name,plan`;
+      const [user] = await tx`INSERT INTO users(id,_local_id,clinic_id,full_name,email,phone,role)
+        VALUES(${data.user!.id},${data.user!.id},${clinicId},${input.full_name},${input.email},${input.phone},'OWNER') RETURNING id,clinic_id,full_name,email,role`;
+      await tx`INSERT INTO clinic_subscriptions(clinic_id,plan_name,status,billing_cycle,trial_end) VALUES(${clinicId},'trial','trial','monthly',${trialEnd})`;
+      return { clinic, user };
     });
-
-  } catch (err: any) {
-    return res.status(500).json({ success: false, error: err.message });
+    return res.status(201).json({ success: true, data: { ...result, session: data.session,
+      requiresEmailConfirmation: !data.session } });
+  } catch (error) {
+    if (authUserId) {
+      const cleanup = await supabaseAdmin.auth.admin.deleteUser(authUserId).catch(() => ({ error: true }));
+      if (cleanup.error) console.error('[register] Account cleanup needs attention');
+    }
+    const conflict = (error as { code?: string }).code === '23505';
+    return res.status(conflict ? 409 : 503).json({ error: conflict ? 'That pharmacy address is already in use. Choose another address.' : 'Account setup is temporarily unavailable. Please retry.' });
   }
 };
 
@@ -85,7 +76,7 @@ export const login = async (req: Request, res: Response) => {
   try {
     const { email, password } = req.body;
     
-    if (!email || !password) {
+    if (typeof email !== 'string' || typeof password !== 'string' || !email.trim() || !password) {
       return res.status(400).json({ success: false, error: 'Email and password are required' });
     }
 
@@ -106,6 +97,7 @@ export const login = async (req: Request, res: Response) => {
       password,
     });
 
+    if (authError && (authError.status === 0 || (authError.status || 0) >= 500)) return res.status(503).json({ success: false, error: 'Sign-in is temporarily unavailable. Please retry.' });
     if (authError || !authData.user) {
       return res.status(401).json({ success: false, error: 'Invalid credentials' });
     }
@@ -121,7 +113,8 @@ export const login = async (req: Request, res: Response) => {
       .single();
 
     if (userQueryError && userQueryError.code !== 'PGRST116') {
-      console.error('[login] User query database error:', userQueryError);
+      console.error('[login] User profile lookup failed');
+      return res.status(503).json({ success: false, error: 'Account verification is temporarily unavailable. Please retry.' });
     }
 
     let userRow = userRowResult;
@@ -139,7 +132,7 @@ export const login = async (req: Request, res: Response) => {
         .single();
 
       if (existingClinicErr && existingClinicErr.code !== 'PGRST116') {
-        console.error('[login] Existing clinic lookup error:', existingClinicErr);
+        return res.status(503).json({ success: false, error: 'Account setup is temporarily unavailable. Please retry.' });
       }
 
       let clinicId: string;
@@ -222,12 +215,14 @@ export const refresh = async (req: Request, res: Response) => {
   const refreshToken = req.body?.refreshToken || req.cookies?.refreshToken;
   if (!refreshToken) return res.status(401).json({ success: false, error: 'No refresh token' });
 
-  const secret = process.env.JWT_SECRET || 'fallback_secret_do_not_use_in_prod';
+  const secret = process.env.JWT_SECRET;
+  if (!secret) return res.status(503).json({ success: false, error: 'Authentication is not configured. Contact support.' });
   const refreshSecret = process.env.JWT_REFRESH_SECRET || secret;
   let payload: jwt.JwtPayload;
   try {
     const verified = jwt.verify(refreshToken, refreshSecret);
-    if (typeof verified === 'string' || !verified.sub) throw new Error('Invalid refresh token');
+    if (typeof verified === 'string' || !verified.sub ||
+        (verified.token_use !== 'refresh' && !(verified.token_use === undefined && typeof verified.exp === 'number' && typeof verified.iat === 'number' && verified.exp - verified.iat > 900))) throw new Error('Invalid refresh token');
     payload = verified;
   } catch {
     return res.status(401).json({ success: false, error: 'Invalid refresh token' });
@@ -242,8 +237,8 @@ export const refresh = async (req: Request, res: Response) => {
     if (!user) return res.status(401).json({ success: false, error: 'User no longer exists' });
     // Re-read role/store assignments on renewal instead of perpetuating old claims.
     const claims = { sub: user.id, clinic_id: user.clinic_id, role: user.role, plan: payload.plan };
-    const accessToken = jwt.sign(claims, secret, { expiresIn: '15m' });
-    const nextRefreshToken = jwt.sign(claims, refreshSecret, { expiresIn: '30d' });
+    const accessToken = jwt.sign({ ...claims, token_use: 'access' }, secret, { expiresIn: '15m' });
+    const nextRefreshToken = jwt.sign({ ...claims, token_use: 'refresh' }, refreshSecret, { expiresIn: '30d' });
     res.cookie('refreshToken', nextRefreshToken, { httpOnly: true, secure: process.env.NODE_ENV === 'production', maxAge: 30 * 24 * 60 * 60 * 1000 });
     return res.status(200).json({ success: true, data: { accessToken, refreshToken: nextRefreshToken } });
   } catch {

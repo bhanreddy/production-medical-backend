@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { AppError } from '../lib/appError';
 import { requireAuth } from '../middleware/auth';
 import { requireRole } from '../middleware/rbac';
 import { createMedicineSchema, updateMedicineSchema } from '../schemas/medicine.schema';
@@ -11,6 +12,19 @@ import {
 } from '../services/batchDisposal';
 
 export const inventoryRouter = Router();
+inventoryRouter.use(requireAuth);
+inventoryRouter.param('id', (req, _res, next, id) => {
+  const resource = /^\/(stocktakes|recalls|alerts|reservations)\//.exec(req.path)?.[1];
+  if (!resource) return next();
+  try {
+    const tables: Record<string, string> = {stocktakes:'stocktake_sessions',recalls:'product_recalls',alerts:'inventory_alerts',reservations:'inventory_reservations'};
+    const {orgId} = resolveOrgAndStore(req);
+    const row = localDb.prepare(`SELECT id FROM ${tables[resource]} WHERE (id = ? OR _local_id = ?) AND organization_id = ? AND _deleted = 0`).get(id,id,orgId) as {id:string} | undefined;
+    if (!row) throw new AppError(404, 'Inventory record not found');
+    req.params.id = row.id;
+    next();
+  } catch (error) { next(error); }
+});
 
 // GET /api/inventory/medicines/search?q=&barcode=
 inventoryRouter.get('/medicines/search', requireAuth, async (req, res, next) => {
@@ -625,7 +639,7 @@ inventoryRouter.post('/stocktakes/:id/count', requireAuth, async (req, res, next
       counterName,
       userId: req.user!.id,
       scannedBarcode,
-      rawQuantity: Number(rawQuantity || 1),
+      rawQuantity: Number(rawQuantity ?? 1),
       unitType,
       conversionFactor: Number(conversionFactor || 1),
       deviceId,

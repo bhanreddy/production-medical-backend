@@ -1,5 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
-import { supabaseAdmin } from '../config/supabase';
+import { requireAuth } from '../middleware/auth';
 import { addClient, removeClient } from '../lib/sseManager';
 
 export const eventsRouter = Router();
@@ -17,36 +17,12 @@ export const eventsRouter = Router();
  * Clients receive events like:
  *   data: {"type":"EXPENSE_ADDED","payload":{...}}
  */
-eventsRouter.get('/stream', async (req: Request, res: Response) => {
-  // ─── Auth: Accept token from header (mobile) OR query param (desktop) ──
-  const headerToken = req.headers.authorization?.startsWith('Bearer ')
-    ? req.headers.authorization.split(' ')[1]
-    : null;
-  const queryToken = req.query.token as string | undefined;
-  const token = headerToken || queryToken;
-
-  if (!token) {
-    return res.status(401).json({ error: 'Missing authentication token' });
-  }
-
-  // Verify token via Supabase
-  const { data: { user: supabaseUser }, error: authError } = await supabaseAdmin.auth.getUser(token);
-
-  if (authError || !supabaseUser) {
-    return res.status(401).json({ error: 'Invalid token' });
-  }
-
-  // Look up clinic_id from users table
-  const { data: userRow } = await supabaseAdmin
-    .from('users')
-    .select('clinic_id')
-    .eq('id', supabaseUser.id)
-    .single();
-
-  const clinicId = userRow?.clinic_id;
-  if (!clinicId) {
-    return res.status(403).json({ error: 'User not associated with a clinic' });
-  }
+eventsRouter.get('/stream', (req: Request, _res: Response, next: NextFunction) => {
+  if (!req.headers.authorization && typeof req.query.token === 'string') req.headers.authorization = `Bearer ${req.query.token}`;
+  next();
+}, requireAuth, (req: Request, res: Response) => {
+  const clinicId = req.user?.clinic_id;
+  if (!clinicId) return res.status(403).json({ error: 'Choose a pharmacy to receive live updates' });
 
   if (res.destroyed || res.writableEnded) return;
 

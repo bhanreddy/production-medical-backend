@@ -11,7 +11,7 @@ import { errorHandler } from './middleware/errorHandler';
 import { helmetConfig, authRateLimit, apiRateLimit, sanitizeInput, validateUUID } from './middleware/security';
 import { initSentry, sentryErrorHandler } from './lib/sentry';
 
-dotenv.config();
+if (process.env.NODE_ENV !== 'test') dotenv.config();
 
 export function createApp(): express.Application {
   initSentry();
@@ -68,6 +68,7 @@ export function createApp(): express.Application {
 
   app.use(['/api/auth/login', '/api/auth/register'], authRateLimit);
   app.use('/api', apiRateLimit, durableRuntime, routes);
+  app.use('/api', (_req, res) => res.status(404).json({ error: { code: 'NOT_FOUND', message: 'This API endpoint does not exist.' } }));
 
   sentryErrorHandler(app);
   app.use(errorHandler);

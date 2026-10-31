@@ -4,9 +4,10 @@ import path from 'path';
 
 // Load the exact .env file depending on NODE_ENV, fallback to default .env
 const nodeEnv = process.env.NODE_ENV || 'development';
-dotenv.config({ path: path.resolve(process.cwd(), `.env.${nodeEnv}`) });
-// Also load generic .env as fallback for missing vars like DB passwords locally
-dotenv.config();
+if (nodeEnv !== 'test') {
+  dotenv.config({ path: path.resolve(process.cwd(), `.env.${nodeEnv}`) });
+  dotenv.config();
+}
 
 const envSchema = z.object({
   PORT:                     z.string().default('5001'),

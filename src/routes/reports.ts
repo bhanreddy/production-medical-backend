@@ -6,6 +6,7 @@ import {
   queryCount,
 } from "../lib/postgresDb";
 import { Router } from "express";
+import { Money } from "../lib/money";
 import { requireAuth } from "../middleware/auth";
 
 import { buildGstr1Payload, SaleRowForGstr1 } from "../services/gstr1Builder";
@@ -53,7 +54,7 @@ reportsRouter.get("/dashboard", requireAuth, async (req, res, next) => {
        counted AS (
          SELECT day,
            COALESCE(SUM(CASE WHEN s.is_return THEN -s.net_amount ELSE s.net_amount END), 0) AS revenue,
-           COUNT(*) FILTER (WHERE NOT COALESCE(s.is_return, false))::int AS bills
+           COUNT(s.id) FILTER (WHERE NOT COALESCE(s.is_return, false))::int AS bills
          FROM days
          LEFT JOIN sales s ON s.clinic_id = ?
            AND s.deleted_at IS NULL
@@ -68,20 +69,22 @@ reportsRouter.get("/dashboard", requireAuth, async (req, res, next) => {
             SELECT COALESCE(SUM(mb.quantity_remaining), 0) AS stock
             FROM medicine_batches mb
             WHERE mb.clinic_id = ? AND mb.medicine_id = m.id
-              AND mb.expiry_date > NOW() AND mb.deleted_at IS NULL
+              AND mb.expiry_date >= (SELECT today FROM win) AND mb.deleted_at IS NULL
+              AND COALESCE(mb.is_disposed, false) = false
           ) batch_stock
           WHERE m.clinic_id = ? AND m.deleted_at IS NULL AND m.is_active = true
-            AND batch_stock.stock <= m.low_stock_threshold AND batch_stock.stock > 0
+            AND batch_stock.stock <= m.low_stock_threshold
          ) AS low_stock_count,
          (SELECT COUNT(*)::int FROM medicine_batches
           WHERE clinic_id = ? AND deleted_at IS NULL AND quantity_remaining > 0 AND expiry_date <= ?
+            AND COALESCE(is_disposed, false) = false
          ) AS expiry_count_30d,
          (SELECT COALESCE(SUM(outstanding_balance), 0) FROM customers
           WHERE clinic_id = ? AND deleted_at IS NULL) AS outstanding_receivable,
          (SELECT COALESCE(SUM(outstanding_balance), 0) FROM suppliers
           WHERE clinic_id = ? AND deleted_at IS NULL) AS outstanding_payable,
          (SELECT COUNT(*)::int FROM shortbook
-          WHERE clinic_id = ? AND is_ordered = false) AS shortbook_count,
+          WHERE clinic_id = ? AND is_ordered = false AND deleted_at IS NULL) AS shortbook_count,
          (SELECT COALESCE(jsonb_agg(jsonb_build_object(
             'id', recent.id, 'invoice_number', recent.invoice_number,
             'net_amount', recent.net_amount, 'created_at', recent.created_at,
@@ -241,25 +244,32 @@ reportsRouter.get("/gst-sales", requireAuth, async (req, res, next) => {
 
     const clinicId = req.user!.clinic_id!;
     const rows = await queryRaw<{ gst_rate: number; total: number }>(
-      `SELECT si.gst_rate, SUM(si.total) as total
-       FROM sale_items si
-       JOIN sales s ON s.id = si.sale_id
-       WHERE si._deleted=0 AND s._deleted=0 AND s.clinic_id=? AND s.created_at>=? AND s.created_at<=?
-       GROUP BY si.gst_rate`,
+      `WITH lines AS (
+         SELECT si.gst_rate, si.total, s.net_amount, COALESCE(s.is_return, false) AS is_return,
+                SUM(si.total) OVER (PARTITION BY s.id) AS line_total
+         FROM sale_items si JOIN sales s ON s.id = si.sale_id
+         WHERE si._deleted=0 AND s._deleted=0 AND s.clinic_id=? AND s.created_at>=? AND s.created_at<=?
+       )
+       SELECT gst_rate, SUM(CASE WHEN line_total <> 0 THEN total * net_amount / line_total ELSE 0 END
+         * CASE WHEN is_return THEN -1 ELSE 1 END) AS total
+       FROM lines GROUP BY gst_rate ORDER BY gst_rate`,
       [clinicId, from, to],
     );
 
     const data = rows.map((r) => {
-      const taxable = Number(r.total ?? 0);
+      const gross = Money.round2(Number(r.total ?? 0));
       const rate = Number(r.gst_rate ?? 0);
-      const gst = (taxable * rate) / 100;
+      // Persisted line totals already include GST for both inclusive and exclusive prices.
+      const taxable = Money.round2(gross / (1 + rate / 100));
+      const gst = Money.round2(gross - taxable);
+      const cgst = Money.round2(gst / 2);
       return {
         gst_rate: rate,
         taxable_amount: taxable,
-        cgst: gst / 2,
-        sgst: gst / 2,
+        cgst,
+        sgst: Money.round2(gst - cgst),
         total_gst: gst,
-        gross_amount: taxable + gst,
+        gross_amount: gross,
       };
     });
 
@@ -287,16 +297,19 @@ reportsRouter.get("/gst-purchases", requireAuth, async (req, res, next) => {
     );
 
     const data = rows.map((r) => {
-      const taxable = Number(r.total ?? 0);
+      const gross = Money.round2(Number(r.total ?? 0));
       const rate = Number(r.gst_rate ?? 0);
-      const gst = (taxable * rate) / 100;
+      // Persisted line totals already include GST for both inclusive and exclusive prices.
+      const taxable = Money.round2(gross / (1 + rate / 100));
+      const gst = Money.round2(gross - taxable);
+      const cgst = Money.round2(gst / 2);
       return {
         gst_rate: rate,
         taxable_amount: taxable,
-        cgst: gst / 2,
-        sgst: gst / 2,
+        cgst,
+        sgst: Money.round2(gst - cgst),
         total_gst: gst,
-        gross_amount: taxable + gst,
+        gross_amount: gross,
       };
     });
 
@@ -314,7 +327,7 @@ reportsRouter.get("/schedule-h1", requireAuth, async (req, res, next) => {
     const conditions = [
       "si._deleted=0",
       "s._deleted=0",
-      "m.is_schedule_h1=1",
+      "m.is_schedule_h1=true",
       "s.clinic_id=?",
     ];
     const values: any[] = [clinicId];

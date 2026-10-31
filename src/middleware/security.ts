@@ -30,6 +30,7 @@ export const authRateLimit = rateLimit({
 export const apiRateLimit = rateLimit({
   windowMs: 60 * 1000,          // 1 minute
   max: 300,                      // 300 requests per minute
+  message: { error: { code: 'RATE_LIMITED', message: 'Too many requests. Please wait a moment and retry.' } },
   skip: (req: any) => req.user?.role === 'SUPER_ADMIN',
 });
 

@@ -76,3 +76,22 @@ test('API keys, expired sessions and foreign signatures are still decided by Sup
  for (const token of tokens) expect((await request(app).get('/protected').set('Authorization',`Bearer ${token}`)).status).toBe(401);
  expect(mockGetUser).toHaveBeenCalledTimes(tokens.length);
 });
+
+test('refresh credentials cannot authenticate protected API requests', async () => {
+ mockLocal.current={id:'operator',clinic_id:'clinic-current',role:'OWNER'};
+ const token=jwt.sign({sub:'operator',token_use:'refresh'},secret,{expiresIn:'30d'});
+ expect((await request(app).get('/protected').set('Authorization',`Bearer ${token}`)).status).toBe(401);
+ expect(mockGetUser).not.toHaveBeenCalled();
+ const legacy=jwt.sign({sub:'operator'},secret,{expiresIn:'30d'});
+ expect((await request(app).get('/protected').set('Authorization',`Bearer ${legacy}`)).status).toBe(401);
+});
+
+test('inactive and deleted accounts are denied even with a valid session', async () => {
+ for (const blocked of [{is_active:false},{deleted_at:'2026-10-01T00:00:00Z'}]) {
+  resetSupabaseIdentityCache();
+  mockProfile.data={clinic_id:'clinic-current',role:'OWNER',...blocked};
+  expect((await request(app).get('/protected').set('Authorization','Bearer supabase-test')).status).toBe(403);
+ }
+ mockLocal.current={id:'operator',clinic_id:'clinic-current',role:'OWNER',is_active:0};
+ expect((await request(app).get('/protected').set('Authorization',`Bearer ${jwt.sign({sub:'operator'},secret)}`)).status).toBe(403);
+});

@@ -1,14 +1,15 @@
 import { z } from 'zod';
+import { dateOnlySchema } from './date.schema';
 
 export const purchaseItemSchema = z.object({
   medicine_id: z.string(),
   batch_number: z.string().min(1),
-  expiry_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),  // YYYY-MM-DD
+  expiry_date: dateOnlySchema,  // YYYY-MM-DD
   quantity: z.number().int().positive(),
-  purchase_price: z.number().positive(),
-  mrp: z.number().positive(),
+  purchase_price: z.number().finite().positive(),
+  mrp: z.number().finite().positive(),
   gst_rate: z.number().refine(v => [0, 5, 12, 18, 28].includes(v)).default(12),
-  discount: z.number().min(0).default(0),
+  discount: z.number().finite().min(0).default(0),
   _local_id: z.string().optional(),
 });
 
@@ -18,7 +19,7 @@ export const createPurchaseSchema = z.object({
   counter_id: z.string().optional().nullable(),
   terminal_id: z.string().optional().nullable(),
   invoice_number: z.string().optional().nullable(),
-  invoice_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().nullable(),
+  invoice_date: dateOnlySchema.optional().nullable(),
   bill_image_url: z.string().url().optional().nullable(),
   notes: z.string().optional().nullable(),
   items: z.array(purchaseItemSchema).min(1),
@@ -40,6 +41,6 @@ export const csvRowSchema = z.object({
 });
 
 export const updatePaymentSchema = z.object({
-  paid_amount: z.number().min(0),
+  paid_amount: z.number().finite().min(0),
   payment_status: z.enum(['unpaid', 'partial', 'paid']),
 });

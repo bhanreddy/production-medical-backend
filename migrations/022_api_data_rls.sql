@@ -1,0 +1,155 @@
+-- The browser/mobile clients use the API for business data. The service-role
+-- backend and database owner retain access; newly created tables must not be
+-- publicly readable through Supabase's default grants. Preserve existing policies.
+DO $$
+DECLARE target text;
+BEGIN
+  FOREACH target IN ARRAY ARRAY[
+    '_app_migrations',
+    'alone',
+    'app_prescription_documents',
+    'app_runtime_checkpoints',
+    'audit_logs',
+    'clinic_invoice_sequences',
+    'clinic_subscriptions',
+    'clinic_users',
+    'clinics',
+    'counters',
+    'coupon_redemptions',
+    'coupons',
+    'customer_addresses',
+    'customer_group_members',
+    'customer_groups',
+    'customer_memberships',
+    'customers',
+    'debit_notes',
+    'device_sync_cursors',
+    'device_tokens',
+    'dispensing_events',
+    'doctors',
+    'document_sequences',
+    'expenses',
+    'financial_years',
+    'goods_receipt_items',
+    'goods_receipts',
+    'inventory_alerts',
+    'inventory_bin_positions',
+    'inventory_classifications',
+    'inventory_positions',
+    'inventory_reservations',
+    'loyalty_accounts',
+    'loyalty_programs',
+    'loyalty_transactions',
+    'medicine_batches',
+    'medicine_master',
+    'medicines',
+    'order_address_snapshots',
+    'order_commercial_snapshots',
+    'order_events',
+    'order_fulfilment_items',
+    'order_fulfilments',
+    'order_items',
+    'order_package_items',
+    'order_packages',
+    'order_refunds',
+    'order_substitutions',
+    'order_transfer_links',
+    'orders',
+    'organizations',
+    'parked_sales',
+    'patient_allergies',
+    'payment_transactions',
+    'prescription_items',
+    'prescriptions',
+    'price_book_items',
+    'price_book_scopes',
+    'price_books',
+    'procurement_policies',
+    'product_barcodes',
+    'product_recalls',
+    'promotion_applications',
+    'promotion_rewards',
+    'promotion_targets',
+    'promotions',
+    'purchase_invoice_items',
+    'purchase_invoices',
+    'purchase_items',
+    'purchase_match_results',
+    'purchase_order_items',
+    'purchase_order_requisition_links',
+    'purchase_order_versions',
+    'purchase_orders',
+    'purchase_requisition_items',
+    'purchase_requisitions',
+    'purchase_return_lines',
+    'purchase_returns',
+    'purchases',
+    'recall_tasks',
+    'refill_reminders',
+    'regions',
+    'safety_warning_events',
+    'sale_batch_allocations',
+    'sale_commercial_snapshots',
+    'sale_items',
+    'sales',
+    'shortbook',
+    'stock_ledger',
+    'stock_transfer_batch_allocations',
+    'stock_transfer_items',
+    'stock_transfers',
+    'stockout_events',
+    'stocktake_counts',
+    'stocktake_items',
+    'stocktake_sessions',
+    'stores',
+    'subscription_invoices',
+    'subscription_plans',
+    'substitution_events',
+    'supervisor_authorizations',
+    'supplier_payable_ledger',
+    'supplier_payment_allocations',
+    'supplier_payments',
+    'supplier_price_history',
+    'supplier_products',
+    'supplier_quotation_items',
+    'supplier_quotations',
+    'supplier_schemes',
+    'suppliers',
+    'sync_conflicts',
+    'sync_sessions',
+    'terminals',
+    'transfer_events',
+    'transfer_package_items',
+    'transfer_packages',
+    'transfer_policies',
+    'transfer_receipt_items',
+    'transfer_receipts',
+    'transfer_variances',
+    'user_organization_access',
+    'user_store_access',
+    'users',
+    'warehouse_bins',
+    'warehouses',
+    'whatsapp_broadcast_log'
+  ] LOOP
+    IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = target) THEN
+      EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', target);
+    END IF;
+  END LOOP;
+  -- Compatibility views must honor the caller's RLS rather than the view owner.
+  FOREACH target IN ARRAY ARRAY['products','inventory_batches','patients','invoices','invoice_items'] LOOP
+    IF EXISTS (SELECT 1 FROM pg_views WHERE schemaname = 'public' AND viewname = target) THEN
+      IF current_setting('server_version_num')::integer >= 150000 THEN
+        EXECUTE format('ALTER VIEW public.%I SET (security_invoker = true)', target);
+      ELSE
+        EXECUTE format('REVOKE ALL ON public.%I FROM PUBLIC', target);
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+          EXECUTE format('REVOKE ALL ON public.%I FROM anon', target);
+        END IF;
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+          EXECUTE format('REVOKE ALL ON public.%I FROM authenticated', target);
+        END IF;
+      END IF;
+    END IF;
+  END LOOP;
+END $$;

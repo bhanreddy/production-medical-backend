@@ -6,6 +6,7 @@ ALTER TABLE purchases ADD COLUMN IF NOT EXISTS grand_total NUMERIC,
   ADD COLUMN IF NOT EXISTS bill_number TEXT;
 UPDATE purchases SET grand_total = net_amount WHERE grand_total IS NULL;
 ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS unit_price NUMERIC,
+  ADD COLUMN IF NOT EXISTS mrp NUMERIC,
   ADD COLUMN IF NOT EXISTS sale_item_id UUID,
   ADD COLUMN IF NOT EXISTS reason TEXT;
 UPDATE sale_items SET unit_price = mrp WHERE unit_price IS NULL;

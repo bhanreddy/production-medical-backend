@@ -25,19 +25,31 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
           clinic_id: string;
           role: string;
           plan: string;
+          token_use?: string;
+          exp?: number;
+          iat?: number;
         };
+
+        if (payload.token_use === 'refresh' || (payload.token_use === undefined && payload.exp && payload.iat && payload.exp - payload.iat > 86400)) {
+          return res.status(401).json({ error: 'An access token is required' });
+        }
 
         // Check local DB first for fast offline execution and test speed
         let resolvedUser: any = null;
-        try {
-          resolvedUser = localDb.prepare('SELECT id, role, clinic_id FROM users WHERE id = ? OR _local_id = ?').get(payload.sub, payload.sub);
-        } catch {}
+        if (!process.env.DATABASE_URL) {
+          try {
+            resolvedUser = localDb.prepare('SELECT id, role, clinic_id, is_active, _deleted FROM users WHERE id = ? OR _local_id = ?').get(payload.sub, payload.sub);
+          } catch {}
+        }
 
         if (!resolvedUser) {
-          resolvedUser = (await getUserProfile(payload.sub)).data;
+          const profile = await getUserProfile(payload.sub);
+          if (profile.error && profile.error.code !== 'PGRST116') return res.status(503).json({ error: 'Account verification is temporarily unavailable. Please retry.' });
+          resolvedUser = profile.data;
         }
 
         if (resolvedUser) {
+          if (resolvedUser.is_active === false || resolvedUser.is_active === 0 || resolvedUser._deleted || resolvedUser.deleted_at) return res.status(403).json({ error: 'Your account is inactive. Contact your administrator.' });
           let finalClinicId = resolvedUser.clinic_id;
           let isImpersonating = false;
 
@@ -54,13 +66,18 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
             id: payload.sub,
             clinic_id: finalClinicId,
             role: resolvedUser.role as AuthUser['role'],
-            email: '',
+            email: resolvedUser.email || '',
             isImpersonating,
           };
+          if (process.env.DATABASE_URL) {
+            const organizationId = await ensureCloudPosDirectory(req.user, resolvedUser.full_name);
+            if (organizationId) { req.user.organization_id = organizationId; req.user.organizationId = organizationId; }
+          }
           return next();
         }
         // User deleted from DB — fall through to Supabase path or reject
       } catch (jwtErr) {
+        if (!(jwtErr instanceof jwt.JsonWebTokenError || jwtErr instanceof jwt.NotBeforeError)) return next(jwtErr);
         // Token is not a custom JWT — fall through to Supabase verification
       }
     }
@@ -88,6 +105,8 @@ export const requireAuth = async (req: Request, res: Response, next: NextFunctio
       // Missing account setup is not evidence of an OWNER role. Registration must provision it.
       return res.status(403).json({ error: { message: 'Your account setup is incomplete. Contact your administrator.', code: 'PROFILE_NOT_CONFIGURED' } });
     }
+
+    if (userRow.is_active === false || userRow.deleted_at) return res.status(403).json({ error: 'Your account is inactive. Contact your administrator.' });
 
     let finalClinicId = userRow.clinic_id;
     let isImpersonating = false;

@@ -133,3 +133,28 @@ test('expired refresh credentials still cannot renew server access', async () =>
   expect(res.status).toHaveBeenCalledWith(401);
   expect(mockSingle).not.toHaveBeenCalled();
 });
+
+
+test('a short-lived access token cannot be exchanged for a month-long refresh credential', async () => {
+  const access = jwt.sign({sub:'operator', token_use:'access'}, process.env.JWT_SECRET!, {expiresIn:'15m'});
+  const res = response();
+  await refresh({body:{refreshToken:access}} as Request, res as unknown as Response);
+  expect(res.status).toHaveBeenCalledWith(401);
+  expect(mockSingle).not.toHaveBeenCalled();
+});
+test('legacy untyped access tokens cannot be used as refresh credentials', async () => {
+  const access = jwt.sign({sub:'operator'}, process.env.JWT_SECRET!, {expiresIn:'15m'});
+  const res = response();
+  await refresh({body:{refreshToken:access}} as Request, res as unknown as Response);
+  expect(res.status).toHaveBeenCalledWith(401);
+});
+test('missing signing configuration never falls back to a publicly known secret', async () => {
+  const secret = process.env.JWT_SECRET;
+  delete process.env.JWT_SECRET;
+  try {
+    const res = response();
+    await refresh({body:{refreshToken:'anything'}} as Request, res as unknown as Response);
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(mockSingle).not.toHaveBeenCalled();
+  } finally { process.env.JWT_SECRET = secret; }
+});

@@ -139,7 +139,7 @@ export class StocktakeEngine {
       LEFT JOIN inventory_positions ip ON ip.batch_id = mb.id 
         AND ip.organization_id = ? 
         AND ${locationId ? `ip.${locationCol} = ?` : `ip.${locationCol} IS NULL`}
-      WHERE (m._deleted = 0 OR m._deleted IS NULL) AND (m.organization_id = ? OR m.organization_id IS NULL)
+      WHERE (m._deleted = 0 OR m._deleted IS NULL) AND (m.organization_id = ?)
       ${medicineClause}
     `;
 

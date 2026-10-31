@@ -1,10 +1,23 @@
 import { Router } from "express";
+import { z } from "zod";
 import { requireAuth } from "../middleware/auth";
 import { requireRole } from "../middleware/rbac";
 import sql from "../db";
 import { queryRaw } from "../lib/postgresDb";
 
 export const clinicsRouter = Router();
+const profileUpdate = z.object({
+  name: z.string().trim().min(1).max(200).optional(),
+  address: z.string().max(2000).nullable().optional(),
+  phone: z.string().trim().max(30).nullable().optional(),
+  email: z.string().trim().email().or(z.literal('')).nullable().optional(),
+  gstin: z.string().trim().length(15).or(z.literal('')).nullable().optional(),
+  drug_licence_number: z.string().max(250).nullable().optional(),
+  logo_url: z.string().max(1500000).nullable().optional(),
+  signature_url: z.string().max(1500000).nullable().optional(),
+  invoice_footer: z.string().max(2000).nullable().optional(),
+  upi_vpa: z.string().trim().max(255).nullable().optional(),
+}).refine(value => Object.keys(value).length > 0, 'Choose at least one setting to update');
 
 // GET /api/clinics/me
 clinicsRouter.get("/me", requireAuth, async (req, res, next) => {
@@ -47,37 +60,8 @@ clinicsRouter.put(
   requireRole("OWNER", "SUPER_ADMIN"),
   async (req, res, next) => {
     try {
-      const {
-        name,
-        address,
-        phone,
-        email,
-        gstin,
-        drug_licence_number,
-        logo_url,
-        signature_url,
-        invoice_footer,
-        upi_vpa,
-      } = req.body;
-
-      // Only allow specific fields to be updated
-      const payload: Record<string, any> = {
-        name,
-        address,
-        phone,
-        email,
-        gstin,
-        drug_licence_number,
-        logo_url,
-        signature_url,
-        invoice_footer,
-        upi_vpa,
-      };
-
-      // Remove undefined values
-      Object.keys(payload).forEach(
-        (key) => payload[key] === undefined && delete payload[key],
-      );
+      if (!req.user?.clinic_id) return res.status(400).json({ error: 'Choose a clinic first.' });
+      const payload = profileUpdate.parse(req.body);
 
       const [data] = await sql<any[]>`
       UPDATE clinics
@@ -86,6 +70,7 @@ clinicsRouter.put(
       RETURNING *
     `;
 
+      if (!data) return res.status(404).json({ error: 'Clinic not found.' });
       res.json({ data });
     } catch (err) {
       next(err);

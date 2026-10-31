@@ -53,9 +53,9 @@ customersRouter.get("/due-reminders", requireAuth, listDueReminders);
 // GET /api/customers
 customersRouter.get("/", requireAuth, async (req, res, next) => {
   try {
-    const page = parseInt(req.query.page as string) || 1;
-    const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
-    const q = req.query.q as string;
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.max(1, Math.min(parseInt(req.query.limit as string) || 20, 100));
+    const q = typeof req.query.q === 'string' ? req.query.q : '';
 
     const clinicId = req.user!.clinic_id!;
     const conditions: string[] = ["clinic_id=?"];
@@ -73,7 +73,7 @@ customersRouter.get("/", requireAuth, async (req, res, next) => {
     if (where) {
       queryStr += ` AND (${where})`;
     }
-    queryStr += ` ORDER BY COALESCE(importance_score, 0) DESC LIMIT ? OFFSET ?`;
+    queryStr += ` ORDER BY COALESCE(importance_score, 0) DESC, name, id LIMIT ? OFFSET ?`;
 
     const [total, data] = await Promise.all([
       queryCount("customers", where, values),

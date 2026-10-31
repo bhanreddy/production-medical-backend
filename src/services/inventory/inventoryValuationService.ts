@@ -47,9 +47,9 @@ export class InventoryValuationService {
       FROM medicine_batches mb
       LEFT JOIN inventory_positions ip ON ip.batch_id = mb.id AND ip.organization_id = ?
       WHERE (mb._deleted = 0 OR mb._deleted IS NULL) AND (mb.is_disposed = 0 OR mb.is_disposed IS NULL)
-        AND mb.quantity_remaining > 0
+        AND mb.quantity_remaining > 0 AND mb.organization_id = ?
     `;
-    const queryParams: any[] = [organizationId];
+    const queryParams: any[] = [organizationId, organizationId];
 
     if (targetId) {
       query += ` AND (mb.${locationCol} = ? OR ip.${locationCol} = ?)`;

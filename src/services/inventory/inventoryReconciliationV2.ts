@@ -72,12 +72,13 @@ export class InventoryReconciliationServiceV2 {
         AND ip.organization_id = ? 
         AND ${targetId ? `ip.${locationCol} = ?` : `ip.${locationCol} IS NULL`}
       WHERE (mb._deleted = 0 OR mb._deleted IS NULL) AND (mb.is_disposed = 0 OR mb.is_disposed IS NULL)
+        AND mb.organization_id = ? AND m.organization_id = ?
       ${medClause}
     `;
 
     const allParams = targetId
-      ? [organizationId, targetId, ...(medicineId ? [medicineId] : [])]
-      : [organizationId, ...(medicineId ? [medicineId] : [])];
+      ? [organizationId, targetId, organizationId, organizationId, ...(medicineId ? [medicineId] : [])]
+      : [organizationId, organizationId, organizationId, ...(medicineId ? [medicineId] : [])];
 
     const batchRows: any[] = localDb.prepare(batchesQuery).all(...allParams);
 

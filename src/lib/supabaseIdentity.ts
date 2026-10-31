@@ -13,6 +13,9 @@ export interface UserProfile {
   clinic_id: string | null;
   role: string;
   full_name: string | null;
+  is_active?: boolean | null;
+  deleted_at?: string | null;
+  email?: string | null;
 }
 
 type ProfileResult = { data: UserProfile | null; error: { code?: string; message?: string } | null };
@@ -118,7 +121,7 @@ async function fetchProfile(userId: string): Promise<ProfileResult> {
     try {
       const { queryRaw } = await import('./postgresDb');
       const rows = await queryRaw<UserProfile>(
-        'SELECT clinic_id, role, full_name FROM users WHERE id = ?',
+        'SELECT clinic_id, role, full_name, is_active, deleted_at, email FROM users WHERE id = ?',
         [userId],
       );
       const data = rows[0] ?? null;
@@ -127,7 +130,7 @@ async function fetchProfile(userId: string): Promise<ProfileResult> {
       return { data: null, error: { code: 'NETWORK_ERROR', message: err instanceof Error ? err.message : 'profile lookup failed' } };
     }
   }
-  const { data, error } = await supabaseAdmin.from('users').select('clinic_id, role, full_name').eq('id', userId).single();
+  const { data, error } = await supabaseAdmin.from('users').select('clinic_id, role, full_name, is_active, deleted_at').eq('id', userId).single();
   return { data, error };
 }
 

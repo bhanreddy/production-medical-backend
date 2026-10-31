@@ -43,6 +43,7 @@ export async function ensureCloudReferenceCatalog(clinicId: string, organization
           // A pending native edit must not be overwritten by a read cache refresh.
           if (existing && Number(existing._synced) === 0) continue;
           const record: Record<string, unknown> = { ...cloud, id, _local_id: existing?._local_id || cloud._local_id || id,
+            ...(table === 'medicines' ? { primary_barcode: cloud.primary_barcode || cloud.barcode || null } : {}),
             organization_id: organizationId, clinic_id: clinicId, _synced: 1, _deleted: cloud.deleted_at ? 1 : 0, _updated_at: String(cloud.updated_at || now) };
           const entries = Object.entries(record).filter(([column]) => columns.has(column)).map(([column,value]) => [column, typeof value === 'boolean' ? Number(value) : value instanceof Date ? value.toISOString() : value] as const);
           localDb.prepare(`INSERT INTO ${table} (${entries.map(([column]) => column).join(',')}) VALUES (${entries.map(() => '?').join(',')})

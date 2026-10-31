@@ -65,3 +65,20 @@ test("POS search does not expose medicines from default organization", () => {
     }).results,
   ).toEqual([]);
 });
+
+import { InventoryAvailabilityService } from '../services/inventory/inventoryAvailabilityService';
+import { InventoryValuationService } from '../services/inventory/inventoryValuationService';
+import { InventoryClassificationEngine } from '../services/inventory/inventoryClassificationEngine';
+import { InventoryReconciliationServiceV2 } from '../services/inventory/inventoryReconciliationV2';
+import { ExpiryIntelligenceEngine } from '../services/inventory/expiryIntelligenceEngine';
+const foreignBatch = randomUUID();
+beforeAll(() => localDb.prepare(`INSERT INTO medicine_batches(id,_local_id,organization_id,medicine_id,batch_number,quantity_remaining,purchase_price,mrp,expiry_date,_updated_at)
+  VALUES(?,?,?,?,?,24,10,20,'2025-01-01',?)`).run(foreignBatch,foreignBatch,'default-org',medicine,'PRIVATE-BATCH',new Date().toISOString()));
+afterAll(() => localDb.prepare('DELETE FROM medicine_batches WHERE id=?').run(foreignBatch));
+test('availability, valuation, ageing, expiry and reconciliation never include another organization’s batches',()=>{
+ expect(()=>InventoryAvailabilityService.getAvailability({organizationId:org,medicineId:medicine,locationType:'STORE'})).toThrow('Medicine not found');
+ expect(InventoryValuationService.getValuation({organizationId:org}).totalUnitsOnHand).toBe(0);
+ expect(InventoryClassificationEngine.getAgeingAnalysis({organizationId:org}).totalStockCostPaise).toBe(0);
+ expect(InventoryReconciliationServiceV2.reconcile({organizationId:org}).diagnostics).toEqual([]);
+ expect(ExpiryIntelligenceEngine.getExpiryRiskItems({organizationId:org}).items).toEqual([]);
+});

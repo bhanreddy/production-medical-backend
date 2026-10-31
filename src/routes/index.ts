@@ -49,7 +49,7 @@ routes.use((req, res, next) => {
   });
   next();
 });
-routes.use(['/procurement', '/commercial', '/prescriptions', '/patients', '/doctors', '/orders'], requireAuth, async (req, _res, next) => {
+routes.use(['/procurement', '/commercial', '/prescriptions', '/patients', '/doctors', '/orders', '/barcodes'], requireAuth, async (req, _res, next) => {
   try {
     if (process.env.NODE_ENV === 'test' && process.env.CLOUD_REFERENCE_CATALOG_ENABLED !== 'true') return next();
     if (req.user?.clinic_id) {

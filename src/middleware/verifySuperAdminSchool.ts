@@ -31,13 +31,6 @@ function getSchoolClients(): { anon: SupabaseClient; admin: SupabaseClient } | n
 /** Same contract as SupabaseBackend verifySuperAdminMiddleware: Bearer = school Supabase JWT; user must be active super_admin or founder. */
 export const verifySuperAdminSchoolMiddleware = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const clients = getSchoolClients();
-    if (!clients) {
-      return res.status(503).json({
-        error: 'Super-admin auth is not configured (set SCHOOL_OPS_SUPABASE_URL, SCHOOL_OPS_SUPABASE_ANON_KEY, SCHOOL_OPS_SUPABASE_SERVICE_ROLE_KEY).',
-      });
-    }
-
     const authHeader = req.headers.authorization;
     if (!authHeader) {
       return res.status(401).json({ error: 'Missing authorization header' });
@@ -46,6 +39,13 @@ export const verifySuperAdminSchoolMiddleware = async (req: Request, res: Respon
     const token = authHeader.split(' ')[1];
     if (!token) {
       return res.status(401).json({ error: 'Malformed authorization header' });
+    }
+
+    const clients = getSchoolClients();
+    if (!clients) {
+      return res.status(503).json({
+        error: 'Super-admin auth is not configured (set SCHOOL_OPS_SUPABASE_URL, SCHOOL_OPS_SUPABASE_ANON_KEY, SCHOOL_OPS_SUPABASE_SERVICE_ROLE_KEY).',
+      });
     }
 
     const { data: { user }, error } = await clients.anon.auth.getUser(token);

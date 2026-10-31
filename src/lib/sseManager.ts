@@ -25,7 +25,9 @@ export function addClient(clinicId: string, res: Response): void {
  */
 export function removeClient(clinicId: string, res: Response): void {
   const list = clients.get(clinicId) || [];
-  clients.set(clinicId, list.filter(r => r !== res));
+  const remaining = list.filter(r => r !== res);
+  if (remaining.length) clients.set(clinicId, remaining);
+  else clients.delete(clinicId);
   console.log(`[SSE] Client removed for clinic ${clinicId} (remaining: ${clients.get(clinicId)?.length ?? 0})`);
 }
 
